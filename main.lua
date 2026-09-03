@@ -46,6 +46,7 @@ local UIManager = require("ui/uimanager")
 local Device = require("device")
 local Screen = Device.screen
 local NetworkMgr = require("ui/network/manager")
+local lfs = require("libs/libkoreader-lfs")
 local Blitbuffer = require("ffi/blitbuffer")
 local DataStorage = require("datastorage")
 local Dispatcher = require("dispatcher")
@@ -107,6 +108,85 @@ end
 
 local function isoDay(offset)
     return os.date("%Y-%m-%d", os.time() + (offset or 0) * 86400)
+end
+
+-- Notatki/Artykuły read local files directly — no server round trip, no new
+-- token, no touching Minifolio or the Readeck sync themselves. These are the
+-- same default directories both already use on this device (confirmed: no
+-- config.lua override for Minifolio, so it still reads /mnt/us/notes).
+local NOTES_DIR = "/mnt/us/notes"
+local ARTICLES_DIR = "/mnt/us/ARTICLES"
+
+--- Every `.md` file directly in NOTES_DIR, newest mtime first. No recursion,
+--- no index, no metadata beyond what the filesystem already gives for free —
+--- exactly what a "notes" concept means when the source is plain Markdown.
+local function notesList()
+    local items = {}
+    if lfs.attributes(NOTES_DIR, "mode") ~= "directory" then return items end
+    for entry in lfs.dir(NOTES_DIR) do
+        if entry:match("%.md$") then
+            local mtime = lfs.attributes(NOTES_DIR .. "/" .. entry, "modification") or 0
+            items[#items + 1] = { name = (entry:gsub("%.md$", "")), mtime = mtime }
+        end
+    end
+    table.sort(items, function(a, b) return a.mtime > b.mtime end)
+    return items
+end
+
+--- Read status from KOReader's own per-book sidecar, never a second source.
+--- `summary.status == "complete"` is the one value this device has actually
+--- shown (confirmed on a real .sdr this session) — trust only that. No
+--- sidecar at all means the book was never opened, which is equally certain.
+--- Anything else (a "reading" value was never actually observed, only
+--- assumed possible) gets a deliberately generic label rather than a guess.
+local function articleStatus(epub_path)
+    local sdr = epub_path:gsub("%.epub$", "") .. ".sdr/metadata.epub.lua"
+    local ok, chunk = pcall(dofile, sdr)
+    if not ok or type(chunk) ~= "table" or type(chunk.summary) ~= "table" then
+        return "nieprzeczytany"
+    end
+    if chunk.summary.status == "complete" then return "przeczytany" end
+    return "otwarty" -- touched, but the exact progress isn't something this file confirms
+end
+
+--- Title = the text before the first " - <feed>" — Readeck's export names
+--- every file "<title> - <feed name> [rd-id_...].epub"; this stops before
+--- both the feed name and the bookmark id without needing to parse the id
+--- out separately. Falls back to the bare filename if a title has no dash.
+local function articlesList()
+    local items = {}
+    if lfs.attributes(ARTICLES_DIR, "mode") ~= "directory" then return items end
+    for entry in lfs.dir(ARTICLES_DIR) do
+        if entry:match("%.epub$") then
+            local path = ARTICLES_DIR .. "/" .. entry
+            local mtime = lfs.attributes(path, "modification") or 0
+            local title = entry:match("^(.-) %- ") or (entry:gsub("%.epub$", ""))
+            items[#items + 1] = { title = title, mtime = mtime, status = articleStatus(path) }
+        end
+    end
+    table.sort(items, function(a, b) return a.mtime > b.mtime end)
+    return items
+end
+
+--- Unread first (mirrors the same "mine first" preview rule the dashboard's
+--- own task list already uses), newest within each group, capped at 3 —
+--- this is the whole screen, not a paginated browser.
+local function articlesPreview(items)
+    local unread, read = {}, {}
+    for _i, it in ipairs(items) do
+        if it.status == "przeczytany" then
+            read[#read + 1] = it
+        else
+            unread[#unread + 1] = it
+        end
+    end
+    local preview = {}
+    for i = 1, math.min(3, #unread) do preview[#preview + 1] = unread[i] end
+    for i = 1, #read do
+        if #preview >= 3 then break end
+        preview[#preview + 1] = read[i]
+    end
+    return preview
 end
 
 --- plDate() only ever formats "now" (see its callers above) — Task Detail
@@ -1474,15 +1554,13 @@ function ReadingOS:handle(dashboard, target, is_hold)
     if target.screen then return self:openScreen(dashboard, target.screen) end
 end
 
---- WIĘCEJ: everything the main surface no longer shows directly. Craftsss/
---- Nauka/Dig/Help already have real screens (openScreen, unchanged) — this
---- menu only relocates their entry point. Notatki/Artykuły have no on-device
---- reader yet, so they route through the same "soon" placeholder as Zakupy's
---- full list and Rachunki, not a fake list.
+--- WIĘCEJ: everything the main surface no longer shows directly. All six
+--- entries now have real screens (openScreen) — Craftsss/Nauka/Dig/Help
+--- unchanged, Notatki/Artykuły new (local files, no server involved).
 function ReadingOS:openMore(dashboard)
     local items = {
-        { text = "NOTATKI", soon = "Notatki — jeszcze niedostępne." },
-        { text = "ARTYKUŁY", soon = "Artykuły — jeszcze niedostępne." },
+        { text = "NOTATKI", screen = "notes" },
+        { text = "ARTYKUŁY", screen = "articles" },
         { text = "CRAFTSSS", screen = "crafts" },
         { text = "NAUKA", screen = "learn" },
         { text = "DIG", screen = "dig" },
@@ -1576,6 +1654,33 @@ function ReadingOS:openScreen(dashboard, screen)
             }
         end
         self:showList("RACHUNKI", items, nil)
+
+    elseif screen == "notes" then
+        -- Read-only glance, not a browser: capped at 3, same as the design
+        -- calls for everywhere else. No tap action — Minifolio is where a
+        -- note is actually opened/edited, not here.
+        local notes = notesList()
+        local items = {}
+        for i = 1, math.min(3, #notes) do
+            items[#items + 1] = { text = notes[i].name, inert = true }
+        end
+        if #items == 0 then
+            items = { { text = _("Brak notatek."), inert = true } }
+        end
+        self:showList("NOTATKI", items, nil)
+
+    elseif screen == "articles" then
+        local articles = articlesList()
+        local preview = articlesPreview(articles)
+        local items = {}
+        for _i, a in ipairs(preview) do
+            items[#items + 1] = { text = a.title, mandatory = a.status, inert = true }
+        end
+        if #items == 0 then
+            items = { { text = _("Brak artykułów."), inert = true } }
+        end
+        local title = #articles > 0 and string.format("ARTYKUŁY   %d", #articles) or "ARTYKUŁY"
+        self:showList(title, items, nil)
 
     elseif screen == "crafts" then
         local items = {}
