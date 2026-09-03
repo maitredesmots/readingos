@@ -45,6 +45,7 @@ local Menu = require("ui/widget/menu")
 local UIManager = require("ui/uimanager")
 local Device = require("device")
 local Screen = Device.screen
+local NetworkMgr = require("ui/network/manager")
 local Blitbuffer = require("ffi/blitbuffer")
 local DataStorage = require("datastorage")
 local Dispatcher = require("dispatcher")
@@ -465,6 +466,13 @@ function Dashboard:claim(y, height, target)
     return y + height
 end
 
+--- 3/5 wireframe grid: HEADER, ZADANIA (full width, top priority), DOM+CO
+--- CZYTAM (half/half), ZAKUPY+CRAFTSSS (half/half), BOTTOM NAV (pinned).
+--- NAUKA/DIG/Help/Notatki/Artykuły moved off the main surface into WIĘCEJ —
+--- the screens themselves (openScreen "learn"/"dig"/"help") are untouched,
+--- only their entry point relocated. Rachunki/Notatki/Artykuły have no data
+--- source yet (Phase 1), so their bottom-nav/menu entries are a plain "soon"
+--- message — never a fake preview built to fill space.
 function Dashboard:build()
     local W, H = Screen:getWidth(), Screen:getHeight()
     local pad = Screen:scaleBySize(18)
@@ -486,9 +494,9 @@ function Dashboard:build()
     -- renders can differ (a FrameContainer adds its own border and padding, a
     -- TextWidget rounds to its font metrics). Registering the asked-for height
     -- made every row below a mismatch drift a few pixels further down the
-    -- screen, and the drift accumulates — which is why the bottom rows, NAUKA
-    -- and DIG, were the ones that swallowed each other's taps. Measure the
-    -- widget instead and the whole column stays honest, top to bottom.
+    -- screen, and the drift accumulates — which is why the bottom rows used
+    -- to swallow each other's taps. Measure the widget instead and the whole
+    -- column stays honest, top to bottom.
     local function add(widget, height, target)
         rows[#rows + 1] = widget
         local ok, size = pcall(function() return widget:getSize() end)
@@ -500,14 +508,46 @@ function Dashboard:build()
         rows[#rows + 1] = VerticalSpan:new { width = h }
         y = y + h
     end
+    -- Register a full-width row's own real height as two independent hit
+    -- targets split at the midpoint — the exact trick the old NAUKA/DIG tile
+    -- row used, now named and reused for every half/half pairing below.
+    local function addSplit(widget, height, left_target, right_target, mid_x)
+        rows[#rows + 1] = widget
+        local ok, size = pcall(function() return widget:getSize() end)
+        local real = (ok and size and size.h and size.h > 0) and size.h or height
+        local ty = y
+        y = y + real
+        left_target.y1, left_target.y2, left_target.x2 = ty, y, mid_x
+        right_target.y1, right_target.y2, right_target.x1 = ty, y, mid_x
+        self.hit[#self.hit + 1] = left_target
+        self.hit[#self.hit + 1] = right_target
+    end
 
-    -- ---- status bar. Inert: no marker, no reaction. Rule 4.
-    local dig = d.dig or {}
-    -- The top line is the way into the manual. Nothing else on the screen has
-    -- room for a help affordance without stealing space from the book.
-    add(lrRow(cw, h_label, plDate():upper(),
-        string.format("%.1f m · %d/%d   ?", dig.depth or 0, dig.collected or 0, dig.collection_total or 42),
-        face(SIZE_LABEL), face(SIZE_LABEL), true), h_label, { screen = "help", label = "help" })
+    -- ---- header. Inert glance line: no marker, no reaction. Rule 4. Device
+    -- data (Wi-Fi, battery) comes from KOReader's own APIs, never a network
+    -- round trip — pcall'd because a hardware quirk must degrade to "—", not
+    -- crash the whole dashboard.
+    local weather = d.weather
+    local weather_text = ""
+    if type(weather) == "table" and weather.temp then
+        weather_text = string.format("%d°", weather.temp)
+        if weather.tmin and weather.tmax then
+            weather_text = weather_text .. string.format(" (%d–%d°)", weather.tmin, weather.tmax)
+        end
+        if weather.stale then weather_text = weather_text .. " ·" end
+    end
+    local ok_wifi, is_wifi = pcall(function() return NetworkMgr:isWifiOn() end)
+    local wifi_text = (ok_wifi and is_wifi) and "WiFi" or "WiFi ×"
+    local ok_batt, capacity = pcall(function() return Device:getPowerDevice():getCapacity() end)
+    local batt_text = (ok_batt and type(capacity) == "number") and (capacity .. "%") or "—"
+    local header_parts = { os.date("%H:%M"), plDate() }
+    if weather_text ~= "" then header_parts[#header_parts + 1] = weather_text end
+    header_parts[#header_parts + 1] = wifi_text
+    header_parts[#header_parts + 1] = batt_text
+    add(LeftContainer:new { dimen = { w = cw, h = h_label },
+        TextWidget:new {
+            text = table.concat(header_parts, "   "), face = face(SIZE_LABEL), max_width = cw,
+        } }, h_label)
     add(rule(cw), Screen:scaleBySize(2))
     gap(8)
 
@@ -530,6 +570,7 @@ function Dashboard:build()
     end
 
     -- ---- attention band, only when something is genuinely late
+    local dig = d.dig or {}
     local overdue, out = 0, 0
     for _i, t in ipairs(d.tasks or {}) do if t.sym == "▲" then overdue = overdue + 1 end end
     for _i, hh in ipairs(d.house or {}) do if hh.state == "out" then out = out + 1 end end
@@ -551,52 +592,18 @@ function Dashboard:build()
         gap(8)
     end
 
-    -- ---- hero. The book always wins the top of the screen.
-    -- No "CZYTASZ" label any more: a title this size, at the top, under a
-    -- progress bar, is not mistakable for anything else — the label was one
-    -- more 6 px gray line explaining what the screen already showed.
-    local book = self.plugin:currentBook(d)
-    add(LeftContainer:new { dimen = { w = cw, h = h_title },
-        TextWidget:new { text = book.title, face = face(SIZE_TITLE), max_width = cw } }, h_title)
-    if book.author ~= "" or book.percent ~= "" then
-        add(lrRow(cw, h_meta, book.author, book.percent, face(SIZE_META), face(SIZE_META), true), h_meta)
+    -- ---- update banner. Announces itself on the dashboard rather than in a
+    -- popup: you came here to read, and a modal on arrival would be an ambush.
+    if self.plugin.update_ready then
+        add(lrRow(cw, h_row, "AKTUALIZACJA  v" .. tostring(self.plugin.update_ready),
+            "zainstaluj  >", face(SIZE_LABEL), face(SIZE_META), true),
+            h_row, { kind = "update", label = "update" })
+        gap(8)
     end
-    -- A real ProgressWidget, not block characters: the Kindle font has no
-    -- ▓/░ glyphs and rendered the first version as diagonal hatching. Full
-    -- width now that the percentage sits on the line above it.
-    if (book.fraction or 0) > 0 then
-        add(ProgressWidget:new {
-            width = cw,
-            height = Screen:scaleBySize(7),
-            percentage = book.fraction,
-            margin_h = 0,
-            margin_v = 0,
-            bordersize = Screen:scaleBySize(1),
-        }, Screen:scaleBySize(9))
-    end
-    gap(8)
 
-    -- [ BOX ] = does something now. Rule 2.
-    add(FrameContainer:new {
-        bordersize = Screen:scaleBySize(1),
-        padding = Screen:scaleBySize(8),
-        width = cw,
-        radius = 0,
-        CenterContainer:new {
-            dimen = { w = cw - Screen:scaleBySize(18), h = h_row },
-            TextWidget:new { text = book.open and "CZYTAJ DALEJ" or "NIE MA OTWARTEJ KSIĄŻKI", face = face(SIZE_ROW) },
-        },
-    }, h_row + Screen:scaleBySize(18), { kind = "continue", label = "continue" })
-    gap(10)
-
-    -- ---- sections. A quiet section collapses to one line: that is the entire
-    -- adaptive-density rule, and why an empty day is an almost empty screen.
-    -- What the header says about a section has to be information, not an
-    -- implementation detail. "(30 of 153)" described the row cap and read as
-    -- 153 things needing attention; "34 today · 119 tomorrow" describes the
-    -- day, which is the only thing worth a glance.
+    -- ---- ZADANIA. Full width, first section — the largest surface on the
+    -- screen, same 3-row/quiet-collapse rule as every other section below.
     local function section(key, label, items, quiet_text, total, summary)
-        gap(6)
         local head = label
         if summary and summary ~= "" then
             head = label .. "   " .. summary
@@ -607,123 +614,134 @@ function Dashboard:build()
             add(lrRow(cw, h_row, head, quiet_text .. "   >", face(SIZE_HEAD), face(SIZE_META), true),
                 h_row, { screen = key, label = key })
         else
-            -- Header, then a hairline directly under it. The rule marks where a
-            -- section *starts*; the old dashed rule after every section marked
-            -- where one ended, which is the same information drawn five times.
             add(lrRow(cw, h_head, head, ">", face(SIZE_HEAD), face(SIZE_HEAD)),
                 h_head, { screen = key, label = key })
             add(rule(cw, true), Screen:scaleBySize(1))
             gap(4)
             for i = 1, math.min(3, #items) do
-                -- What the bottom of the screen owes: two tiles, the manual row,
-                -- the footer and ZAMKNIJ. A section that would eat into that
-                -- stops early — the header already carries the total, and the
-                -- way out of the screen must never be the thing that falls off
-                -- it. On a day with a craft waiting this used to overflow in
-                -- silence, and the type sizes only made the drop worse.
-                if y + h_row > H - Screen:scaleBySize(210) then break end
                 local it = items[i]
-                -- The row carries the whole item, because tapping it now opens a
-                -- menu that needs to know whether the task repeats and who it
-                -- belongs to — not just its id.
                 add(lrRow(cw, h_row, "  " .. rowText(it), it.meta,
                     face(SIZE_ROW), face(SIZE_META), true),
                     h_row, { kind = it.kind, id = it.id, screen = key, label = it.text, row = it })
             end
         end
-        gap(10)
     end
 
     local totals = d.totals or {}
-    -- CRAFTS only appears when a pattern is actually waiting. A section that is
-    -- empty most weeks must not cost a line most weeks.
-    if #(d.crafts or {}) > 0 then
-        section("crafts", "ROBÓTKI", d.crafts, "nic nie wysłane")
-    end
     local tb = totals.task_buckets or {}
     local tparts = {}
     if (tb.past or 0) > 0 then tparts[#tparts + 1] = tb.past .. " zaległe" end
     if (tb.today or 0) > 0 then tparts[#tparts + 1] = tb.today .. " dziś" end
     if (tb.tmrw or 0) > 0 then tparts[#tparts + 1] = tb.tmrw .. " jutro" end
-    -- The three rows are mine: duty categories, me or both of us. Everything
-    -- else in the horizon is still counted in the header and still one tap
-    -- away in the full list — it is just not what the home screen argues about.
     section("tasks", "ZADANIA", d.preview_tasks or d.tasks or {}, "nic na mnie",
         totals.tasks, table.concat(tparts, " · "))
-    section("house", "DOM", d.house or {}, "wszystko jest", totals.house)
-
-    -- ---- NAUKA and DIG as two tiles, not two more thin rows. These are the two
-    -- that a finger kept swapping: they sit lowest, where the thumb reaches
-    -- worst, and missing by one row swapped a whole screen for another. Half the
-    -- width and three lines tall each, they are hard to confuse and hard to miss.
     gap(10)
-    local learn = d.learn or {}
-    local tpad = Screen:scaleBySize(10)
+    add(rule(cw, true), Screen:scaleBySize(1))
+    gap(10)
+
+    -- ---- half/half rows. Same column geometry as the old NAUKA/DIG tiles,
+    -- generalised: a label, up to 2 preview lines (narrower column than a
+    -- full-width section, so one row tighter than the 3-row cap elsewhere),
+    -- or a quiet_text when there is nothing to show. No border, no card — an
+    -- open column, the pairing line itself is the only separator.
     local bw = math.floor((cw - Screen:scaleBySize(12)) / 2)
-    local inner = bw - 2 * tpad
-    local tile_h = h_label + h_title + h_meta + 2 * tpad + Screen:scaleBySize(2)
 
-    -- The number is the tile. It was set in the same 6 px as its own caption,
-    -- so both tiles read as three grey lines and neither said anything from
-    -- across the room.
-    local function tile(title, number, caption)
-        local function centred(text, size, height, gray)
-            return CenterContainer:new {
-                dimen = { w = inner, h = height },
-                TextWidget:new {
-                    text = text, face = face(size), max_width = inner,
-                    fgcolor = gray and Blitbuffer.COLOR_GRAY_5 or nil,
-                },
-            }
+    local function halfList(label, items, quiet_text, count_label)
+        local head = label
+        if count_label and count_label ~= "" then head = label .. "   " .. count_label end
+        local group = VerticalGroup:new { align = "left",
+            TextWidget:new { text = head, face = face(SIZE_HEAD), max_width = bw } }
+        if #items == 0 then
+            table.insert(group, TextWidget:new {
+                text = quiet_text, face = face(SIZE_META), fgcolor = Blitbuffer.COLOR_GRAY_5, max_width = bw })
+        else
+            for i = 1, math.min(2, #items) do
+                table.insert(group, TextWidget:new {
+                    text = "  " .. rowText(items[i]), face = face(SIZE_ROW), max_width = bw })
+            end
         end
-        return FrameContainer:new {
-            bordersize = Screen:scaleBySize(1), padding = tpad, width = bw, radius = 0,
-            VerticalGroup:new { align = "left",
-                centred(title, SIZE_LABEL, h_label, true),
-                centred(number, SIZE_TITLE, h_title),
-                centred(caption, SIZE_META, h_meta, true) },
-        }
+        return group
     end
 
-    local ldue = learn.due or 0
-    local tiles = OverlapGroup:new { dimen = { w = cw, h = tile_h } }
-    table.insert(tiles, LeftContainer:new { dimen = { w = cw, h = tile_h },
-        tile("NAUKA",
-            ldue > 0 and tostring(ldue) or "✓",
-            ldue > 0 and ("fiszek · " .. (learn.minutes or 1) .. " min")
-                or ((learn.streak or 0) .. " dni z rzędu")) })
-    table.insert(tiles, RightContainer:new { dimen = { w = cw, h = tile_h },
-        tile("DIG",
-            string.format("%.1f m", dig.depth or 0),
-            dig.stall or string.format("%d/%d", dig.collected or 0, dig.collection_total or 42)) })
+    -- DOM + CO CZYTAM
+    do
+        local house = d.house or {}
+        -- Both containers span the FULL row width (cw), not half each: Left/
+        -- RightContainer align their *content* to an edge of their own box —
+        -- give them only bw and Right's "push to the right edge" math has
+        -- nowhere to push to, and both columns paint on top of each other.
+        local left = LeftContainer:new { dimen = { w = cw, h = 1 }, -- height fixed up after measuring both
+            halfList("DOM", house, "wszystko jest", totals.house and totals.house > 0 and tostring(totals.house) or nil) }
 
-    -- One target per half, split down the middle — the same trick the craft
-    -- screen's two buttons use.
-    local ty = y
-    add(tiles, tile_h)
-    self.hit[#self.hit + 1] = { y1 = ty, y2 = y, x2 = pad + bw, screen = "learn", label = "learn" }
-    self.hit[#self.hit + 1] = { y1 = ty, y2 = y, x1 = pad + bw, screen = "dig", label = "dig" }
+        local book = self.plugin:currentBook(d)
+        local right_group = VerticalGroup:new { align = "left",
+            TextWidget:new { text = book.title, face = face(SIZE_HEAD), max_width = bw } }
+        if book.author ~= "" or book.percent ~= "" then
+            table.insert(right_group, TextWidget:new {
+                text = (book.author ~= "" and book.author or "") ..
+                    (book.percent ~= "" and ("   " .. book.percent) or ""),
+                face = face(SIZE_META), fgcolor = Blitbuffer.COLOR_GRAY_5, max_width = bw })
+        end
+        if (book.fraction or 0) > 0 then
+            table.insert(right_group, VerticalSpan:new { width = Screen:scaleBySize(4) })
+            table.insert(right_group, ProgressWidget:new {
+                width = bw, height = Screen:scaleBySize(6), percentage = book.fraction,
+                margin_h = 0, margin_v = 0, bordersize = Screen:scaleBySize(1),
+            })
+        end
+        local right = RightContainer:new { dimen = { w = cw, h = 1 }, right_group }
 
-    -- A "?" tucked on the end of the status line was too quiet to find, which
-    -- made the game look like unexplained noise. The manual gets its own row.
-    gap(6)
-    add(lrRow(cw, h_row, "JAK TO DZIAŁA", ">", face(SIZE_LABEL), face(SIZE_LABEL)),
-        h_row, { screen = "help", label = "help" })
+        -- Real height first: both columns must share the row's full height so
+        -- the split-hit trick below stays correct regardless of which side is
+        -- visually taller.
+        local _, lsize = pcall(function() return left[1]:getSize() end)
+        local _, rsize = pcall(function() return right[1]:getSize() end)
+        local row_h = math.max((lsize and lsize.h) or 0, (rsize and rsize.h) or 0, h_row)
+        left.dimen.h, right.dimen.h = row_h, row_h
 
-    -- An update announces itself on the dashboard rather than in a popup: you
-    -- came here to read, and a modal on arrival would be an ambush.
-    if self.plugin.update_ready then
-        add(lrRow(cw, h_row, "AKTUALIZACJA  v" .. tostring(self.plugin.update_ready),
-            "zainstaluj  >", face(SIZE_LABEL), face(SIZE_META), true),
-            h_row, { kind = "update", label = "update" })
+        local pair = OverlapGroup:new { dimen = { w = cw, h = row_h } }
+        table.insert(pair, left)
+        table.insert(pair, right)
+        addSplit(pair, row_h,
+            { screen = "house", label = "house" },
+            { kind = "continue", label = "continue" },
+            pad + bw)
     end
-
-    -- ---- footer: staleness, one rotating hint, and the way out.
-    -- The way out has to be visible. Swipe-right alone was a gesture with no
-    -- sign on the screen that it existed, which is the same mistake as hiding
-    -- an action behind a long press.
     gap(10)
-    add(rule(cw), Screen:scaleBySize(2))
+    add(rule(cw, true), Screen:scaleBySize(1))
+    gap(10)
+
+    -- ZAKUPY + CRAFTSSS
+    do
+        local shopping = d.shopping or { total = 0, preview = {} }
+        local shop_items = {}
+        for _i, name in ipairs(shopping.preview or {}) do
+            shop_items[#shop_items + 1] = { sym = "·", text = name }
+        end
+        local left = LeftContainer:new { dimen = { w = cw, h = 1 },
+            halfList("ZAKUPY", shop_items, "lista pusta",
+                (shopping.total or 0) > 0 and tostring(shopping.total) or nil) }
+
+        local crafts = d.crafts or {}
+        local right = RightContainer:new { dimen = { w = cw, h = 1 },
+            halfList("CRAFTSSS", crafts, "nic w budowie",
+                #crafts > 0 and tostring(#crafts) or nil) }
+
+        local _, lsize = pcall(function() return left[1]:getSize() end)
+        local _, rsize = pcall(function() return right[1]:getSize() end)
+        local row_h = math.max((lsize and lsize.h) or 0, (rsize and rsize.h) or 0, h_row)
+        left.dimen.h, right.dimen.h = row_h, row_h
+
+        local pair = OverlapGroup:new { dimen = { w = cw, h = row_h } }
+        table.insert(pair, left)
+        table.insert(pair, right)
+        addSplit(pair, row_h,
+            { kind = "soon", label = "Pełna lista zakupów jeszcze niedostępna — zobacz w przeglądarce." },
+            { screen = "crafts", label = "crafts" },
+            pad + bw)
+    end
+
+    -- ---- footer: staleness / one rotating hint, inert, glance-only.
     local foot = ""
     if self.age then
         foot = string.format("offline · dane sprzed %d h", math.floor(self.age / 3600))
@@ -735,20 +753,54 @@ function Dashboard:build()
         end
     end
     if foot ~= "" then
+        gap(10)
         add(CenterContainer:new { dimen = { w = cw, h = h_meta },
             TextWidget:new { text = foot, face = face(SIZE_META), fgcolor = Blitbuffer.COLOR_GRAY_5 } }, h_meta)
     end
-    gap(4)
-    add(FrameContainer:new {
-        bordersize = Screen:scaleBySize(1),
-        padding = Screen:scaleBySize(7),
-        width = cw,
-        radius = 0,
-        CenterContainer:new {
-            dimen = { w = cw - Screen:scaleBySize(16), h = h_row },
-            TextWidget:new { text = "ZAMKNIJ", face = face(SIZE_ROW) },
-        },
-    }, h_row + Screen:scaleBySize(16), { kind = "close", label = "close" })
+
+    -- ---- bottom nav: pinned to the very bottom of the screen, not stacked
+    -- with the rest of the scrolling content. The spacer below is computed
+    -- from `y`, the REAL running offset every `add()`/`addSplit()` call above
+    -- already measured via getSize() — never an assumed content height.
+    local nav_h = math.max(MIN_TAP, Screen:scaleBySize(SIZE_LABEL * 2.6 * FONT_SCALE))
+    local nav_reserve = Screen:scaleBySize(2) + nav_h -- rule + the nav row itself
+    local spacer = H - pad - nav_reserve - y
+    if spacer > 0 then
+        rows[#rows + 1] = VerticalSpan:new { width = spacer }
+        y = y + spacer
+    end
+
+    add(rule(cw), Screen:scaleBySize(2))
+    local nav_items = {
+        { label = "ZADANIA", target = { screen = "tasks", label = "tasks" } },
+        { label = "DOM", target = { screen = "house", label = "house" } },
+        { label = "ZAKUPY", target = { kind = "soon", label = "Pełna lista zakupów jeszcze niedostępna — zobacz w przeglądarce." } },
+        { label = "RACHUNKI", target = { kind = "soon", label = "Rachunki — wkrótce." } },
+        { label = "WIĘCEJ", target = { kind = "more", label = "more" } },
+    }
+    local seg_w = math.floor(cw / #nav_items)
+    local nav_group = HorizontalGroup:new {}
+    for i, it in ipairs(nav_items) do
+        if i > 1 then
+            table.insert(nav_group, LineWidget:new {
+                dimen = Geom:new { w = Screen:scaleBySize(1), h = nav_h },
+                background = Blitbuffer.COLOR_GRAY_5,
+            })
+        end
+        table.insert(nav_group, CenterContainer:new {
+            dimen = { w = seg_w - Screen:scaleBySize(1), h = nav_h },
+            TextWidget:new { text = it.label, face = face(SIZE_LABEL) },
+        })
+    end
+    local nav_ty = y
+    add(nav_group, nav_h)
+    for i, it in ipairs(nav_items) do
+        local x1 = pad + (i - 1) * seg_w
+        local x2 = (i == #nav_items) and (pad + cw) or (pad + i * seg_w)
+        local target = { screen = it.target.screen, kind = it.target.kind, label = it.target.label }
+        target.y1, target.y2, target.x1, target.x2 = nav_ty, y, x1, x2
+        self.hit[#self.hit + 1] = target
+    end
 
     return FrameContainer:new {
         background = Blitbuffer.COLOR_WHITE,
@@ -1396,7 +1448,43 @@ function ReadingOS:handle(dashboard, target, is_hold)
         return self:restockMenu(dashboard, target.row or { id = target.id, text = target.label })
     end
 
+    -- One honest placeholder, reused everywhere a section has no data source
+    -- yet (Zakupy's full list, Rachunki, and — from the WIĘCEJ menu —
+    -- Notatki/Artykuły). Never a fake screen, never fake rows.
+    if target.kind == "soon" then
+        UIManager:show(InfoMessage:new { text = _(target.label or "Jeszcze niedostępne.") })
+        return
+    end
+
+    if target.kind == "more" then
+        return self:openMore(dashboard)
+    end
+
     if target.screen then return self:openScreen(dashboard, target.screen) end
+end
+
+--- WIĘCEJ: everything the main surface no longer shows directly. Craftsss/
+--- Nauka/Dig/Help already have real screens (openScreen, unchanged) — this
+--- menu only relocates their entry point. Notatki/Artykuły have no on-device
+--- reader yet, so they route through the same "soon" placeholder as Zakupy's
+--- full list and Rachunki, not a fake list.
+function ReadingOS:openMore(dashboard)
+    local items = {
+        { text = "NOTATKI", soon = "Notatki — jeszcze niedostępne." },
+        { text = "ARTYKUŁY", soon = "Artykuły — jeszcze niedostępne." },
+        { text = "CRAFTSSS", screen = "crafts" },
+        { text = "NAUKA", screen = "learn" },
+        { text = "DIG", screen = "dig" },
+        { text = "HELP", screen = "help" },
+    }
+    self:showList("WIĘCEJ", items, function(item, menu)
+        UIManager:close(menu)
+        if item.soon then
+            UIManager:show(InfoMessage:new { text = _(item.soon) })
+        elseif item.screen then
+            self:openScreen(dashboard, item.screen)
+        end
+    end)
 end
 
 function ReadingOS:openScreen(dashboard, screen)
