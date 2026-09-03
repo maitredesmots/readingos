@@ -94,6 +94,17 @@ local function plDate(t)
     return string.format("%s %d %s", DAYS[d.wday], d.day, MONTHS[d.month])
 end
 
+--- "1180.41" -> "1 180,41 zł" — space thousands separator, comma decimal,
+--- the Polish convention every other Moneeey surface already uses.
+local function formatPln(n)
+    local neg = n < 0
+    n = math.abs(n)
+    local whole = math.floor(n)
+    local cents = math.floor((n - whole) * 100 + 0.5)
+    local grouped = tostring(whole):reverse():gsub("(%d%d%d)", "%1 "):reverse():gsub("^%s+", "")
+    return (neg and "-" or "") .. grouped .. string.format(",%02d zł", cents)
+end
+
 local function isoDay(offset)
     return os.date("%Y-%m-%d", os.time() + (offset or 0) * 86400)
 end
@@ -736,7 +747,7 @@ function Dashboard:build()
         table.insert(pair, left)
         table.insert(pair, right)
         addSplit(pair, row_h,
-            { kind = "soon", label = "Pełna lista zakupów jeszcze niedostępna — zobacz w przeglądarce." },
+            { screen = "shopping", label = "shopping" },
             { screen = "crafts", label = "crafts" },
             pad + bw)
     end
@@ -774,8 +785,8 @@ function Dashboard:build()
     local nav_items = {
         { label = "ZADANIA", target = { screen = "tasks", label = "tasks" } },
         { label = "DOM", target = { screen = "house", label = "house" } },
-        { label = "ZAKUPY", target = { kind = "soon", label = "Pełna lista zakupów jeszcze niedostępna — zobacz w przeglądarce." } },
-        { label = "RACHUNKI", target = { kind = "soon", label = "Rachunki — wkrótce." } },
+        { label = "ZAKUPY", target = { screen = "shopping", label = "shopping" } },
+        { label = "RACHUNKI", target = { screen = "bills", label = "bills" } },
         { label = "WIĘCEJ", target = { kind = "more", label = "more" } },
     }
     local seg_w = math.floor(cw / #nav_items)
@@ -1534,6 +1545,37 @@ function ReadingOS:openScreen(dashboard, screen)
                 self:restockMenu(dashboard, item.row, mark)
             end
         end)
+
+    elseif screen == "shopping" then
+        -- Read-only: ReadingOS has no toggle/mutation for shopping items (that
+        -- stays in Foood's own UI), so every row is inert — Rule 4, no marker
+        -- on a row that reacts to nothing.
+        local names = (d.shopping or {}).items or {}
+        local items = {}
+        for _i, name in ipairs(names) do
+            items[#items + 1] = { text = name, inert = true }
+        end
+        if #items == 0 then
+            items = { { text = _("Lista pusta."), inert = true } }
+        end
+        self:showList("ZAKUPY", items, nil)
+
+    elseif screen == "bills" then
+        -- Read-only, same reason as Zakupy: no mutation from ReadingOS, so
+        -- both rows are inert.
+        local bills = d.bills or {}
+        local items = {}
+        if (bills.count or 0) == 0 then
+            items = { { text = _("Brak rachunków w tym miesiącu."), inert = true } }
+        else
+            local mnum = tonumber(tostring(bills.month or ""):match("%-(%d+)$"))
+            items = {
+                { text = formatPln(bills.spent or 0), inert = true },
+                { text = string.format("%d płatności · %s", bills.count,
+                    (mnum and MONTHS[mnum]) or ""), inert = true },
+            }
+        end
+        self:showList("RACHUNKI", items, nil)
 
     elseif screen == "crafts" then
         local items = {}
