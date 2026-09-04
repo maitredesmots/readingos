@@ -614,10 +614,13 @@ function Dashboard:build()
         self.hit[#self.hit + 1] = right_target
     end
 
-    -- ---- header. Inert glance line: no marker, no reaction. Rule 4. Device
-    -- data (Wi-Fi, battery) comes from KOReader's own APIs, never a network
-    -- round trip — pcall'd because a hardware quirk must degrade to "—", not
-    -- crash the whole dashboard.
+    -- ---- header. ✕ ZAMKNIJ on the left is the one way out of the whole
+    -- screen — always here, never absent even on an empty dashboard, and
+    -- deliberately not part of bottom nav (that is navigation WITHIN
+    -- ReadingOS; this leaves it). Rest of the line stays Rule 4 (inert glance,
+    -- no marker, no reaction): device data (Wi-Fi, battery) comes from
+    -- KOReader's own APIs, never a network round trip — pcall'd because a
+    -- hardware quirk must degrade to "—", not crash the whole dashboard.
     local weather = d.weather
     local weather_text = ""
     if type(weather) == "table" and weather.temp then
@@ -635,10 +638,20 @@ function Dashboard:build()
     if weather_text ~= "" then header_parts[#header_parts + 1] = weather_text end
     header_parts[#header_parts + 1] = wifi_text
     header_parts[#header_parts + 1] = batt_text
+
+    local close_glyph = TextWidget:new { text = "✕ ZAMKNIJ", face = face(SIZE_LABEL) }
+    local ok_cs, close_size = pcall(function() return close_glyph:getSize() end)
+    local close_w = (ok_cs and close_size and close_size.w) or Screen:scaleBySize(60)
+    local close_gap = Screen:scaleBySize(14)
     add(LeftContainer:new { dimen = { w = cw, h = h_label },
-        TextWidget:new {
-            text = table.concat(header_parts, "   "), face = face(SIZE_LABEL), max_width = cw,
-        } }, h_label)
+        HorizontalGroup:new {
+            close_glyph,
+            HorizontalSpan:new { width = close_gap },
+            TextWidget:new {
+                text = table.concat(header_parts, "   "), face = face(SIZE_LABEL),
+                max_width = cw - close_w - close_gap,
+            },
+        } }, h_label, { kind = "close", label = "close", x2 = pad + close_w })
     add(rule(cw), Screen:scaleBySize(2))
     gap(8)
 
