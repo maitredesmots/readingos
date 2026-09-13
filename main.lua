@@ -3385,7 +3385,7 @@ function ReadingOS:addToMainMenu(menu_items)
                 callback = function() self:showLockScreen() end,
             },
             {
-                text = _("📱 Telefon"),
+                text = _("Telefon"),
                 callback = function() self:showPhone() end,
             },
             {
