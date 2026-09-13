@@ -40,6 +40,7 @@ local ProgressWidget = require("ui/widget/progresswidget")
 local TextWidget = require("ui/widget/textwidget")
 local InfoMessage = require("ui/widget/infomessage")
 local ConfirmBox = require("ui/widget/confirmbox")
+local QRMessage = require("ui/widget/qrmessage")
 local GestureRange = require("ui/gesturerange")
 local Menu = require("ui/widget/menu")
 local UIManager = require("ui/uimanager")
@@ -70,6 +71,7 @@ local DEFAULTS = {
     readingos_ss_light_off = true,   -- keep the frontlight dark across a redraw
     readingos_lock_minutes = 30,     -- on-demand lock screen auto-unlocks after
     readingos_ss_landscape = true,   -- three categories side by side need the width
+    readingos_device_id = "",        -- generated once on first "Telefon" open, never regenerated
 }
 
 local CACHE_FILE = DataStorage:getDataDir() .. "/cache/readingos.json"
@@ -237,6 +239,21 @@ end
 
 local function baseUrl()
     return (tostring(get("readingos_url")):gsub("/+$", ""))
+end
+
+-- ---------------------------------------------------------- phone companion
+--
+-- V1 (pairing only) — see TODO.md "ReadingOS Phone Companion / Remote".
+-- Not a secret: it only ever identifies which Kindle a heartbeat/pairing
+-- request came from, so math.random is fine — no crypto module needed on
+-- device for this. Persisted, never regenerated, so it survives restarts.
+local function deviceId()
+    local id = tostring(get("readingos_device_id") or "")
+    if id ~= "" then return id end
+    math.randomseed(os.time() + (os.clock() * 1000000))
+    id = string.format("kindle-%08x%08x", math.random(0, 0xffffffff), math.random(0, 0xffffffff))
+    set("readingos_device_id", id)
+    return id
 end
 
 -- ------------------------------------------------------------------- http
@@ -3067,6 +3084,61 @@ function ReadingOS:showLockScreen()
     UIManager:show(LockView:new { plugin = self, data = data, stale = stale }, "full")
 end
 
+-- V1 pairing only (see TODO.md "ReadingOS Phone Companion / Remote"): shows
+-- a QR the phone scans, then polls whether it's been consumed while the QR
+-- is on screen. No remote control, no state mirror, no content bridge yet.
+--
+-- Poll cadence: every 8s, same "only while this specific view is open"
+-- shape as LockView's tick — never a background loop, unscheduled on close.
+function ReadingOS:showPhone()
+    local id = deviceId()
+    local body = encode({ device_id = id, name = "Kindle" })
+    local res, err = request("POST", baseUrl() .. "/api/readingos/phone/pair", body)
+    if not res then
+        track("phone", "pair_request_failed", err)
+        UIManager:show(InfoMessage:new {
+            text = _("Brak połączenia z serwerem — spróbuj ponownie."),
+        })
+        return
+    end
+    local pairing = decode(res)
+    if not pairing or not pairing.pair_url or not pairing.token then
+        UIManager:show(InfoMessage:new { text = _("Nieprawidłowa odpowiedź serwera.") })
+        return
+    end
+    track("phone", "pair_request", nil)
+
+    local token = pairing.token
+    local poll_task
+    local qr = QRMessage:new {
+        text = pairing.pair_url,
+        width = Screen:scaleBySize(420),
+        height = Screen:scaleBySize(420),
+        timeout = 90,
+        dismiss_callback = function()
+            if poll_task then UIManager:unschedule(poll_task) end
+        end,
+    }
+
+    poll_task = function()
+        local status_res = request("GET", baseUrl() .. "/api/readingos/phone/pair/" .. token .. "/status")
+        local status = status_res and decode(status_res)
+        if status and status.consumed then
+            track("phone", "paired", nil)
+            UIManager:close(qr)
+            UIManager:show(InfoMessage:new { text = _("✓ Telefon sparowany.") })
+            return
+        end
+        if status and status.expired then
+            return -- let the QR's own timeout close it; nothing left to poll for
+        end
+        UIManager:scheduleIn(8, poll_task)
+    end
+
+    UIManager:show(qr)
+    UIManager:scheduleIn(8, poll_task)
+end
+
 -- ----------------------------------------------------------- active sleep
 
 local function toggleSuspend()
@@ -3240,6 +3312,10 @@ function ReadingOS:addToMainMenu(menu_items)
             {
                 text = _("Zablokuj ekran"),
                 callback = function() self:showLockScreen() end,
+            },
+            {
+                text = _("📱 Telefon"),
+                callback = function() self:showPhone() end,
             },
             {
                 text = _("Jak to działa"),
