@@ -3084,12 +3084,26 @@ function ReadingOS:showLockScreen()
     UIManager:show(LockView:new { plugin = self, data = data, stale = stale }, "full")
 end
 
+-- Heartbeat: tells the backend this device is still alive, so the phone's
+-- "connected" dot means something. Piggybacks on showPhone()'s existing 8s
+-- tick rather than a loop of its own — nothing schedules this outside that
+-- tick. request() already no-ops on failure (returns nil, err) instead of
+-- throwing, so a dropped network here can never take the tick down with it.
+local function heartbeat(id)
+    request("POST", baseUrl() .. "/api/readingos/phone/heartbeat", encode({ device_id = id }))
+end
+
 -- V1 pairing only (see TODO.md "ReadingOS Phone Companion / Remote"): shows
 -- a QR the phone scans, then polls whether it's been consumed while the QR
 -- is on screen. No remote control, no state mirror, no content bridge yet.
 --
 -- Poll cadence: every 8s, same "only while this specific view is open"
 -- shape as LockView's tick — never a background loop, unscheduled on close.
+-- The same tick also heartbeats (see above): while the QR is up AND while
+-- the "✓ Telefon sparowany" confirmation stays on screen afterwards (an
+-- InfoMessage the user hasn't tapped away yet — same as InfoMessage always
+-- behaves elsewhere in this file, nothing new). Tapping it closed is what
+-- ends the heartbeat; nothing runs once "Telefon" is no longer on screen.
 function ReadingOS:showPhone()
     local id = deviceId()
     local body = encode({ device_id = id, name = "Kindle" })
@@ -3121,12 +3135,29 @@ function ReadingOS:showPhone()
     }
 
     poll_task = function()
+        heartbeat(id)
         local status_res = request("GET", baseUrl() .. "/api/readingos/phone/pair/" .. token .. "/status")
         local status = status_res and decode(status_res)
         if status and status.consumed then
             track("phone", "paired", nil)
             UIManager:close(qr)
-            UIManager:show(InfoMessage:new { text = _("✓ Telefon sparowany.") })
+            -- Kept alive by the InfoMessage staying open (dismissable, no
+            -- timeout): each tick from here just heartbeats, no more
+            -- pairing status to check. Tapping it away unschedules below,
+            -- same mechanism the QR above already used.
+            local paired_msg
+            paired_msg = InfoMessage:new {
+                text = _("✓ Telefon sparowany."),
+                dismiss_callback = function()
+                    UIManager:unschedule(poll_task)
+                end,
+            }
+            poll_task = function()
+                heartbeat(id)
+                UIManager:scheduleIn(8, poll_task)
+            end
+            UIManager:show(paired_msg)
+            UIManager:scheduleIn(8, poll_task)
             return
         end
         if status and status.expired then
