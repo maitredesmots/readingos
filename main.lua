@@ -3122,6 +3122,35 @@ function ReadingOS:showPhone()
     end
     track("phone", "pair_request", nil)
 
+    -- Wake lock, same shape as CraftView:setAwake/releaseAwake above (this
+    -- file's own established pattern — not a new mechanism): the heartbeat
+    -- above only runs because poll_task keeps re-scheduling itself via
+    -- UIManager:scheduleIn, and this device's own idle power management
+    -- (auto-standby/auto-suspend) freezes that scheduling once the Kindle
+    -- goes untouched — exactly the case here, since the whole point of
+    -- Phone Companion is that every tap happens on the *phone*, never on
+    -- the Kindle. Confirmed on a real PW3: heartbeat landed a few times
+    -- then silently stopped while the screen kept showing "sparowany" (the
+    -- E-Ink frame doesn't care whether the CPU is still running).
+    --
+    -- `preventStandby`/`allowStandby` are a refcounted pair — an unmatched
+    -- allowStandby() is a hard assert crash in UIManager, so `locked` guards
+    -- against ever releasing twice or releasing without having acquired.
+    -- Held only for as long as a Phone Companion screen (QR, or the
+    -- post-pair confirmation) is actually up; released on every exit path
+    -- below, never left standing once "Telefon" is off screen.
+    local locked = false
+    local function lockStandby()
+        if locked then return end
+        locked = true
+        UIManager:preventStandby()
+    end
+    local function releaseStandby()
+        if not locked then return end
+        locked = false
+        UIManager:allowStandby()
+    end
+
     local token = pairing.token
     local poll_task
     local qr = QRMessage:new {
@@ -3131,6 +3160,13 @@ function ReadingOS:showPhone()
         timeout = 90,
         dismiss_callback = function()
             if poll_task then UIManager:unschedule(poll_task) end
+            -- Fires on user-dismiss, the QR's own 90s timeout, AND our own
+            -- programmatic UIManager:close(qr) below on pairing success —
+            -- in that last case the lock is re-taken immediately after for
+            -- the paired-confirmation phase (see below), so the session
+            -- never actually goes unlocked in between; every other case
+            -- means the session is genuinely over.
+            releaseStandby()
         end,
     }
 
@@ -3140,16 +3176,19 @@ function ReadingOS:showPhone()
         local status = status_res and decode(status_res)
         if status and status.consumed then
             track("phone", "paired", nil)
-            UIManager:close(qr)
+            UIManager:close(qr) -- releases the QR-phase lock via dismiss_callback above
+            lockStandby() -- re-acquire for the confirmation phase below — same tick, no gap
+
             -- Kept alive by the InfoMessage staying open (dismissable, no
             -- timeout): each tick from here just heartbeats, no more
-            -- pairing status to check. Tapping it away unschedules below,
-            -- same mechanism the QR above already used.
+            -- pairing status to check. Tapping it away unschedules AND
+            -- releases the lock — the last exit path of this session.
             local paired_msg
             paired_msg = InfoMessage:new {
                 text = _("✓ Telefon sparowany."),
                 dismiss_callback = function()
                     UIManager:unschedule(poll_task)
+                    releaseStandby()
                 end,
             }
             poll_task = function()
@@ -3161,11 +3200,12 @@ function ReadingOS:showPhone()
             return
         end
         if status and status.expired then
-            return -- let the QR's own timeout close it; nothing left to poll for
+            return -- let the QR's own timeout close it; that release path already covers this
         end
         UIManager:scheduleIn(8, poll_task)
     end
 
+    lockStandby() -- acquired right before the timed loop actually starts
     UIManager:show(qr)
     UIManager:scheduleIn(8, poll_task)
 end
