@@ -550,6 +550,7 @@ function Dashboard:init()
     self.opened_at = os.time()
     self.dimen = Geom:new { x = 0, y = 0, w = Screen:getWidth(), h = Screen:getHeight() }
     self.covers_fullscreen = true
+    self.readingos_screen = "dashboard" -- Phone Companion V2: identifies this widget to executeRemoteCommand
 
     if Device:isTouchDevice() then
         self.ges_events = {
@@ -1041,6 +1042,10 @@ function ReadingOS:showList(title, items, on_pick)
         is_popout = false,
         width = Screen:getWidth(),
         height = Screen:getHeight(),
+        -- Phone Companion V2: only a Menu tagged this way is offered Next/Prev
+        -- by executeRemoteCommand — KOReader's Menu is the only ReadingOS
+        -- screen with real page navigation (onNextPage/onPrevPage).
+        readingos_screen = "menu",
         -- `inert` and `dim` are deliberately different things. KOReader renders
         -- a dim item in COLOR_DARK_GRAY, which is right for a row that has been
         -- spent and wrong for the manual — that is why the help text came out
@@ -1208,6 +1213,7 @@ function TaskDetail:init()
     self.opened_at = os.time()
     self.dimen = Geom:new { x = 0, y = 0, w = Screen:getWidth(), h = Screen:getHeight() }
     self.covers_fullscreen = true
+    self.readingos_screen = "detail" -- Phone Companion V2: identifies this widget to executeRemoteCommand
     self.hit = {}
     if Device:isTouchDevice() then
         self.ges_events = {
@@ -1756,6 +1762,7 @@ function LearnView:init()
     self.opened_at = os.time()
     self.dimen = Geom:new { x = 0, y = 0, w = Screen:getWidth(), h = Screen:getHeight() }
     self.covers_fullscreen = true
+    self.readingos_screen = "learn" -- Phone Companion V2: identifies this widget to executeRemoteCommand
     self.hit = {}
     self.again = {}
     if Device:isTouchDevice() then
@@ -2030,6 +2037,7 @@ function CraftView:init()
     self.opened_at = os.time()
     self.dimen = Geom:new { x = 0, y = 0, w = Screen:getWidth(), h = Screen:getHeight() }
     self.covers_fullscreen = true
+    self.readingos_screen = "craft" -- Phone Companion V2: identifies this widget to executeRemoteCommand
     self.hit = {}
     if Device:isTouchDevice() then
         self.ges_events = {
@@ -2968,6 +2976,11 @@ function LockView:init()
     self.dimen = Geom:new { x = 0, y = 0, w = Screen:getWidth(), h = Screen:getHeight() }
     self.covers_fullscreen = true
     self.modal = true
+    -- Phone Companion V2: tagged "lock", not a generic screen — executeRemoteCommand
+    -- refuses every command outright while this is on top. The lock screen exists to
+    -- hide content until an on-device unlock; a remote command bypassing it from a
+    -- merely-paired phone (no on-device proof at command time) would defeat that.
+    self.readingos_screen = "lock"
     self.opened_at = os.time()
     local minutes = math.max(1, tonumber(get("readingos_lock_minutes")) or 30)
     self.until_ts = os.time() + minutes * 60
@@ -3093,17 +3106,120 @@ local function heartbeat(id)
     request("POST", baseUrl() .. "/api/readingos/phone/heartbeat", encode({ device_id = id }))
 end
 
--- V1 pairing only (see TODO.md "ReadingOS Phone Companion / Remote"): shows
--- a QR the phone scans, then polls whether it's been consumed while the QR
--- is on screen. No remote control, no state mirror, no content bridge yet.
+-- ------------------------------------------------------ V2: BASIC REMOTE
+--
+-- Peek-then-ack-then-execute, one command at a time — see hooome's
+-- src/readingos/remoteCommands.js for the server side of this same state
+-- machine (queued -> acked -> done|failed, or queued -> expired).
+
+local function fetchNextCommand(id)
+    local res = request("GET", baseUrl() .. "/api/readingos/phone/command/next?device=" .. id)
+    local data = res and decode(res)
+    return data and data.command or nil
+end
+
+--- @return boolean won true only if this tick is the one that gets to execute
+--- the command — a 409 (already acked/expired by a retried poll) means no.
+local function ackCommand(cmdId)
+    local res = request("POST", baseUrl() .. "/api/readingos/phone/command/" .. tostring(cmdId) .. "/ack")
+    return res ~= nil
+end
+
+local function postCommandResult(cmdId, status, result)
+    request("POST", baseUrl() .. "/api/readingos/phone/command/" .. tostring(cmdId) .. "/result",
+        encode({ status = status, result = result }))
+end
+
+-- Fixed six-command allowlist, mirrored by hooome's own ALLOWED_COMMANDS in
+-- src/readingos/remoteCommands.js — keep both in sync if this ever changes.
+-- Open and Scroll were deliberately cut for V2 (no safe mapping exists for
+-- Open on a touch-only PW3 — KOReader's Menu never tracks a selected item
+-- outside a real tap there; no scroll primitive exists anywhere in this
+-- file's screens) — never re-add either under another name.
+local REMOTE_BLOCKED_SCREENS = {
+    -- LockView exists to hide content until an on-device unlock. A remote
+    -- command only proves the phone still holds a paired session, not that
+    -- anything happened on the device just now — so every command refuses
+    -- outright here rather than opening a way to bypass the lock remotely.
+    lock = true,
+}
+
+--- Runs one remote command against whatever ReadingOS screen is currently on
+--- top of the UIManager stack. Only ever touches widgets tagged
+--- `readingos_screen` (set in each screen's :init(), see Dashboard/TaskDetail/
+--- LearnView/CraftView/LockView/showList's Menu above) — the book reader,
+--- KOReader's own dialogs, and anything else underneath are never reached.
+--- @return string status "done" or "failed"
+--- @return string|nil result short label, nil on a plain success
+local function executeRemoteCommand(plugin, cmd)
+    local top = UIManager:getTopmostVisibleWidget()
+    if top and top.readingos_screen and REMOTE_BLOCKED_SCREENS[top.readingos_screen] then
+        return "failed", "locked"
+    end
+
+    if cmd == "home" then
+        -- Unwind every ReadingOS widget stacked above (Dashboard -> WIĘCEJ ->
+        -- CraftView is a real depth this codebase reaches), reusing each
+        -- screen's own :onClose() so telemetry/cleanup still runs exactly as
+        -- it would for a real swipe-back. Idempotent: already-on-Dashboard is
+        -- a no-op, never a redundant refetch+redraw.
+        local guard = 0
+        while true do
+            guard = guard + 1
+            if guard > 20 then return "failed", "error" end -- stack never settled; give up rather than loop forever
+            local w = UIManager:getTopmostVisibleWidget()
+            if not w or not w.readingos_screen or REMOTE_BLOCKED_SCREENS[w.readingos_screen] then break end
+            if w.readingos_screen == "dashboard" then return "done", "noop" end
+            if w.onClose then w:onClose() else UIManager:close(w) end
+        end
+        plugin:showDashboard()
+        return "done", nil
+    end
+
+    if cmd == "back" or cmd == "close" then
+        -- Same one-level unwind for both — Close never falls back to Home's
+        -- multi-level behavior, per the V2 spec.
+        if not top or not top.readingos_screen then return "done", "noop" end -- nothing of ours on screen: safe result, not an error
+        if top.onClose then top:onClose() else UIManager:close(top) end
+        return "done", nil
+    end
+
+    if cmd == "next" or cmd == "prev" then
+        -- Only a real KOReader Menu (showList/showCollection) has page
+        -- navigation. Dashboard/TaskDetail/LearnView/CraftView/LockView have
+        -- no pagination or scroll of any kind — confirmed by reading this
+        -- file, not assumed — so every other screen is unsupported_on_screen.
+        if not top or top.readingos_screen ~= "menu" then return "failed", "unsupported_on_screen" end
+        if cmd == "next" then top:onNextPage() else top:onPrevPage() end
+        return "done", nil
+    end
+
+    if cmd == "refresh" then
+        -- V2 scope: Dashboard only, via its own existing refreshInto().
+        if not top or top.readingos_screen ~= "dashboard" then return "failed", "unsupported_on_screen" end
+        plugin:refreshInto(top)
+        return "done", nil
+    end
+
+    return "failed", "unknown_command" -- unreachable in practice: hooome validates against this same allowlist first
+end
+
+-- Shows a QR the phone scans, then polls whether it's been consumed while the
+-- QR is on screen. V2 adds BASIC REMOTE (home/back/next/prev/close/refresh)
+-- on top of the same post-pair tick — still no state mirror, no screenshots,
+-- no content bridge, no arbitrary item selection.
 --
 -- Poll cadence: every 8s, same "only while this specific view is open"
 -- shape as LockView's tick — never a background loop, unscheduled on close.
--- The same tick also heartbeats (see above): while the QR is up AND while
--- the "✓ Telefon sparowany" confirmation stays on screen afterwards (an
--- InfoMessage the user hasn't tapped away yet — same as InfoMessage always
--- behaves elsewhere in this file, nothing new). Tapping it closed is what
--- ends the heartbeat; nothing runs once "Telefon" is no longer on screen.
+-- The same tick also heartbeats and (once paired) polls/executes at most one
+-- remote command per tick: while the QR is up AND while the "✓ Telefon
+-- sparowany" confirmation stays on screen afterwards (an InfoMessage the
+-- user hasn't tapped away yet — same as InfoMessage always behaves
+-- elsewhere in this file, nothing new). Tapping it closed is what ends the
+-- heartbeat/command polling; nothing runs once "Telefon" is no longer on
+-- screen. 8s was kept as-is rather than tightened for V2 — untested whether
+-- that reads as responsive enough on a real PW3; revisit after physical
+-- testing if it feels sluggish.
 function ReadingOS:showPhone()
     local id = deviceId()
     local body = encode({ device_id = id, name = "Kindle" })
@@ -3193,6 +3309,34 @@ function ReadingOS:showPhone()
             }
             poll_task = function()
                 heartbeat(id)
+
+                -- At most one command per tick, never a batch — e-ink
+                -- execution is strictly serial. Ack first: only the tick that
+                -- wins the ack (not a 409 from an already-acked/expired row)
+                -- ever calls executeRemoteCommand, so a retried/duplicate
+                -- poll can never double-execute the same command.
+                local cmd = fetchNextCommand(id)
+                if cmd and cmd.id and cmd.cmd and ackCommand(cmd.id) then
+                    -- pcall: a bad/unexpected screen state inside dispatch
+                    -- must never take the heartbeat/pairing tick down with
+                    -- it. Result is posted via scheduleIn(0, ...) rather than
+                    -- immediately after dispatch returns — the closest thing
+                    -- to "after the render settled" KOReader's APIs expose to
+                    -- plugin code: setDirty only *enqueues* a repaint, it
+                    -- never blocks or calls back, so this yields one tick to
+                    -- let that repaint run first rather than reporting DONE
+                    -- in the same instant the command was merely dispatched.
+                    local ok, status, result = pcall(executeRemoteCommand, self, cmd.cmd)
+                    local cmd_id = cmd.id
+                    UIManager:scheduleIn(0, function()
+                        if ok then
+                            postCommandResult(cmd_id, status, result)
+                        else
+                            postCommandResult(cmd_id, "failed", "error")
+                        end
+                    end)
+                end
+
                 UIManager:scheduleIn(8, poll_task)
             end
             UIManager:show(paired_msg)
