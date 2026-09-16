@@ -2501,7 +2501,7 @@ end
 
 local CraftView = InputContainer:extend {
     plugin = nil,
-    pattern = nil,   -- { id, title, rows = { {id, n, text, done, repeat} } }
+    pattern = nil,   -- { id, title, size, rows = { {id, key, n, label, section, text, count, kind, flags, done, repeat} } }
     cursor = 1,      -- 1-based index of the row being worked
     awake_until = nil,
     awake_task = nil,
@@ -2535,6 +2535,27 @@ function CraftView:claim(y, height, target)
     return y + height
 end
 
+-- Polish plural for stitches: 1 oczko, 2–4 oczka, the rest oczek (12–14 too).
+local function oczka(n)
+    local t, u = n % 100, n % 10
+    if n == 1 then return "1 oczko" end
+    if u >= 2 and u <= 4 and not (t >= 12 and t <= 14) then return n .. " oczka" end
+    return n .. " oczek"
+end
+
+local function rowFlag(r, name)
+    for _i, f in ipairs(r.flags or {}) do if f == name then return true end end
+    return false
+end
+
+--- One context line: "Round 12  Ch-1, turn, sc…" — label, then the start of
+--- the instruction. Context is allowed to truncate; the current row never is.
+local function contextText(r)
+    local head, body = r.label or "", r.text or ""
+    if head ~= "" and body ~= "" then return head .. "  " .. body end
+    return head ~= "" and head or body
+end
+
 function CraftView:build()
     local W, H = Screen:getWidth(), Screen:getHeight()
     local pad = Screen:scaleBySize(18)
@@ -2546,9 +2567,14 @@ function CraftView:build()
     local h_meta = Screen:scaleBySize(SIZE_META * 1.7)
     local h_row = Screen:scaleBySize(SIZE_ROW * 1.8)
     local h_big = Screen:scaleBySize(SIZE_TITLE * 1.5)
+    local TextBoxWidget = require("ui/widget/textboxwidget")
 
-    local function add(w, h, target)
+    -- Every hit region is claimed from the widget's MEASURED height, never
+    -- from the height it was asked for: a wrapped instruction is taller than
+    -- any guess, and guessed heights drift the tap targets below it.
+    local function add(w, target)
         rows[#rows + 1] = w
+        local h = w:getSize().h
         if target then y = self:claim(y, h, target) else y = y + h end
     end
     local function gap(px)
@@ -2561,99 +2587,158 @@ function CraftView:build()
     local total = #list
     local doneCount = 0
     for _i, r in ipairs(list) do if r.done then doneCount = doneCount + 1 end end
+    local cur = list[self.cursor]
 
-    -- header: title, and the count that answers "how much is left"
-    add(lrRow(cw, h_meta, "‹  " .. self.pattern.title,
+    -- header: what this is, and the count that answers "how much is left"
+    local head = "‹  " .. self.pattern.title
+    if self.pattern.size then head = head .. " · " .. tostring(self.pattern.size) end
+    add(lrRow(cw, h_meta, head,
         string.format("%d / %d", math.min(self.cursor, total), total),
-        faceFull(SIZE_META), faceFull(SIZE_META), true), h_meta, { kind = "back" })
+        faceFull(SIZE_META), faceFull(SIZE_META), true), { kind = "back" })
     add(ProgressWidget:new {
         width = cw, height = Screen:scaleBySize(7),
         percentage = total > 0 and (doneCount / total) or 0,
         margin_h = 0, margin_v = 0, bordersize = Screen:scaleBySize(1),
-    }, Screen:scaleBySize(12))
-    gap(10)
+    })
+    gap(6)
 
-    -- two rows behind: enough context to know where you are, greyed and
-    -- tappable only for jumping back when you lose count.
-    for i = math.max(1, self.cursor - 2), self.cursor - 1 do
-        local r = list[i]
-        if r then
-            add(lrRow(cw, h_row, string.format("  %d  %s", r.n, r.text), r.done and "done" or "",
-                faceFull(SIZE_META), faceFull(SIZE_META), true), h_row, { kind = "goto", index = i })
+    -- where am I: the section and my place inside it
+    if cur and cur.section then
+        local i_in, n_in = 0, 0
+        for i, r in ipairs(list) do
+            if r.section == cur.section then
+                n_in = n_in + 1
+                if i <= self.cursor then i_in = i_in + 1 end
+            end
         end
+        add(lrRow(cw, h_meta, string.upper(tostring(cur.section)), string.format("%d / %d", i_in, n_in),
+            faceFull(SIZE_META), faceFull(SIZE_META), true))
+        add(rule(cw))
     end
+    gap(6)
 
-    -- the current row, framed and large. This is the only thing on the screen
-    -- meant to be read from a distance while your hands are working.
-    local cur = list[self.cursor]
-    if cur then
+    -- The current row is the only thing on the screen meant to be read from a
+    -- distance while your hands are working. It is built first so that the
+    -- context around it can yield to it, never the other way round.
+    local iw = cw - Screen:scaleBySize(26)
+    local function currentBox(face, maxh)
+        if not cur then
+            return CenterContainer:new { dimen = { w = cw, h = h_big },
+                TextWidget:new { text = "gotowe — cały wzór zrobiony", face = faceFull(SIZE_ROW) } }
+        end
         local inner = {}
-        inner[#inner + 1] = LeftContainer:new { dimen = { w = cw - Screen:scaleBySize(26), h = h_meta },
-            TextWidget:new { text = tostring(cur.n), face = faceFull(SIZE_META), fgcolor = Blitbuffer.COLOR_GRAY_5 } }
+        local title = cur.label or string.format("krok %d", cur.n or self.cursor)
+        if cur.kind == "note" then title = title .. " · notatka" end
+        if cur.repeat_of then
+            title = title .. string.format(" · powtórzenie %d z %d", cur.repeat_i, cur.repeat_of)
+        end
+        inner[#inner + 1] = LeftContainer:new { dimen = { w = iw, h = h_meta },
+            TextWidget:new { text = title, face = faceFull(SIZE_META), fgcolor = Blitbuffer.COLOR_GRAY_5, max_width = iw } }
         inner[#inner + 1] = VerticalSpan:new { width = Screen:scaleBySize(6) }
         -- Long instructions wrap instead of being cut: a truncated round is a
-        -- ruined round.
-        local TextBoxWidget = require("ui/widget/textboxwidget")
+        -- ruined round. `maxh` is only ever set as a last resort (see below).
         inner[#inner + 1] = TextBoxWidget:new {
-            text = cur.text,
-            face = faceFull(SIZE_TITLE),
-            width = cw - Screen:scaleBySize(26),
-            alignment = "left",
+            text = cur.text or "", face = face, width = iw, alignment = "left",
+            height = maxh, height_overflow_show_ellipsis = maxh ~= nil,
         }
-        if cur.repeat_of then
+        if cur.count then
             inner[#inner + 1] = VerticalSpan:new { width = Screen:scaleBySize(8) }
-            inner[#inner + 1] = RightContainer:new { dimen = { w = cw - Screen:scaleBySize(26), h = h_meta },
-                TextWidget:new {
-                    text = string.format("powtórzenie %d z %d", cur.repeat_i, cur.repeat_of),
-                    face = faceFull(SIZE_META), fgcolor = Blitbuffer.COLOR_GRAY_5,
-                } }
+            inner[#inner + 1] = RightContainer:new { dimen = { w = iw, h = h_meta },
+                TextWidget:new { text = "→ " .. oczka(cur.count), face = faceFull(SIZE_ROW) } }
         end
-        add(FrameContainer:new {
+        if rowFlag(cur, "size_unresolved") then
+            inner[#inner + 1] = VerticalSpan:new { width = Screen:scaleBySize(8) }
+            inner[#inner + 1] = LeftContainer:new { dimen = { w = iw, h = h_meta },
+                TextWidget:new { text = "UWAGA: rozmiar nierozstrzygnięty — popraw w Craftsss",
+                    face = faceFull(SIZE_META), max_width = iw } }
+        end
+        return FrameContainer:new {
             bordersize = Screen:scaleBySize(2), padding = Screen:scaleBySize(11),
             width = cw, radius = 0,
             VerticalGroup:new { align = "left", unpack(inner) },
-        }, h_big * 2)
-    else
-        add(CenterContainer:new { dimen = { w = cw, h = h_big },
-            TextWidget:new { text = "gotowe — cały wzór zrobiony", face = faceFull(SIZE_ROW) } }, h_big)
+        }
     end
 
-    -- three rows ahead: what is coming, inert.
-    gap(8)
-    for i = self.cursor + 1, math.min(total, self.cursor + 3) do
+    -- Budget: what the fixed chrome below the box will take, so the buttons
+    -- always land on screen. Then shrink the context before the instruction,
+    -- and the instruction's face before its text.
+    local h_buttons = h_row + Screen:scaleBySize(22)
+    local reserved = Screen:scaleBySize(10) + h_buttons + Screen:scaleBySize(8)
+        + Screen:scaleBySize(2) + h_meta + pad
+    local avail = H - y - reserved
+
+    local box = currentBox(faceFull(SIZE_TITLE))
+    local n_behind = math.min(2, self.cursor - 1)
+    local n_ahead = math.min(3, total - self.cursor)
+    local function fits()
+        return box:getSize().h + (n_behind + n_ahead) * h_row + Screen:scaleBySize(18) <= avail
+    end
+    while not fits() and (n_behind + n_ahead) > 0 do
+        -- Ahead goes first; the row just finished stays longest, because "did
+        -- my tap register?" is answered by seeing it marked OK.
+        if n_ahead >= n_behind and n_ahead > 0 then n_ahead = n_ahead - 1 else n_behind = n_behind - 1 end
+    end
+    if not fits() then box = currentBox(faceFull(SIZE_ROW)) end
+    if not fits() then
+        -- A single row longer than the screen. Clip with an ellipsis rather
+        -- than push ZROBIONE off the panel — and flag it for craftsss (P2).
+        box = currentBox(faceFull(SIZE_ROW), math.max(h_row, avail - 4 * h_meta - Screen:scaleBySize(60)))
+    end
+
+    -- behind: enough to know where you are, greyed, tappable to jump back
+    for i = self.cursor - n_behind, self.cursor - 1 do
         local r = list[i]
         if r then
-            add(LeftContainer:new { dimen = { w = cw, h = h_row },
-                TextWidget:new {
-                    text = string.format("  %d  %s", r.n, r.text),
-                    face = faceFull(SIZE_META), fgcolor = Blitbuffer.COLOR_GRAY_5, max_width = cw,
-                } }, h_row)
+            add(lrRow(cw, h_row, "  " .. contextText(r), r.done and "OK" or "",
+                faceFull(SIZE_META), faceFull(SIZE_META), true), { kind = "goto", index = i })
         end
     end
 
-    -- the two buttons, side by side and as large as the screen allows
+    add(box)
+
+    -- ahead: what is coming, inert
+    gap(8)
+    for i = self.cursor + 1, self.cursor + n_ahead do
+        local r = list[i]
+        if r then
+            add(LeftContainer:new { dimen = { w = cw, h = h_row },
+                TextWidget:new { text = "  " .. contextText(r), face = faceFull(SIZE_META),
+                    fgcolor = Blitbuffer.COLOR_GRAY_5, max_width = cw } })
+        end
+    end
+
+    -- Anchor the buttons to the bottom: a layout that floats reads as
+    -- unresolved, and a thumb learns one place for ZROBIONE.
+    local slack = H - y - reserved
+    if slack > 0 then
+        rows[#rows + 1] = VerticalSpan:new { width = slack }
+        y = y + slack
+    end
     gap(10)
     local bw = math.floor((cw - Screen:scaleBySize(10)) / 2)
-    local buttons = OverlapGroup:new { dimen = { w = cw, h = h_row + Screen:scaleBySize(22) } }
-    table.insert(buttons, LeftContainer:new { dimen = { w = cw, h = h_row + Screen:scaleBySize(22) },
+    local buttons = OverlapGroup:new { dimen = { w = cw, h = h_buttons } }
+    table.insert(buttons, LeftContainer:new { dimen = { w = cw, h = h_buttons },
         FrameContainer:new { bordersize = Screen:scaleBySize(1), padding = Screen:scaleBySize(10),
             width = bw, radius = 0, background = Blitbuffer.COLOR_BLACK,
             CenterContainer:new { dimen = { w = bw - Screen:scaleBySize(22), h = h_row },
                 TextWidget:new { text = "ZROBIONE", face = faceFull(SIZE_ROW), fgcolor = Blitbuffer.COLOR_WHITE } } } })
-    table.insert(buttons, RightContainer:new { dimen = { w = cw, h = h_row + Screen:scaleBySize(22) },
+    -- COFNIJ dims when there is nothing to undo; it never disappears, so the
+    -- layout holds still and the thumb keeps its map of the screen.
+    table.insert(buttons, RightContainer:new { dimen = { w = cw, h = h_buttons },
         FrameContainer:new { bordersize = Screen:scaleBySize(1), padding = Screen:scaleBySize(10),
             width = bw, radius = 0,
             CenterContainer:new { dimen = { w = bw - Screen:scaleBySize(22), h = h_row },
-                TextWidget:new { text = "COFNIJ", face = faceFull(SIZE_ROW) } } } })
+                TextWidget:new { text = "COFNIJ", face = faceFull(SIZE_ROW),
+                    fgcolor = self.cursor > 1 and nil or Blitbuffer.COLOR_GRAY_5 } } } })
     -- One tap target per half, split down the middle.
     local by = y
-    add(buttons, h_row + Screen:scaleBySize(22))
+    add(buttons)
     self.hit[#self.hit + 1] = { y1 = by, y2 = y, x2 = pad + bw, kind = "done" }
     self.hit[#self.hit + 1] = { y1 = by, y2 = y, x1 = pad + bw, kind = "undo_row" }
 
     -- how long the screen will stay awake, so it is never a mystery
     gap(8)
-    add(rule(cw), Screen:scaleBySize(2))
+    add(rule(cw))
     local awake = "ekran gaśnie normalnie · dotknij, by zmienić"
     if self.awake_until then
         local left = math.max(0, math.floor((self.awake_until - os.time()) / 60))
@@ -2661,7 +2746,7 @@ function CraftView:build()
     end
     add(CenterContainer:new { dimen = { w = cw, h = h_meta },
         TextWidget:new { text = awake, face = faceFull(SIZE_META), fgcolor = Blitbuffer.COLOR_GRAY_5 } },
-        h_meta, { kind = "awake" })
+        { kind = "awake" })
 
     return FrameContainer:new {
         background = Blitbuffer.COLOR_WHITE, bordersize = 0, padding = pad,
@@ -2811,6 +2896,9 @@ function ReadingOS:openPattern(id)
     for _i, r in ipairs(data.rows) do
         if type(r.repeat_) == "table" then r.repeat_i, r.repeat_of = r.repeat_.i, r.repeat_.of end
         if type(r["repeat"]) == "table" then r.repeat_i, r.repeat_of = r["repeat"].i, r["repeat"].of end
+        -- A row is never blank on screen: an older server sends title-only
+        -- rows, and the label is then the only thing there is to show.
+        if (r.text == nil or r.text == "") then r.text = r.label or "" end
     end
     track("craft", "open", data.title)
     UIManager:show(CraftView:new { plugin = self, pattern = data }, "full")
@@ -4233,5 +4321,6 @@ end
 -- one piece of layout arithmetic here that can silently push ZAMKNIJ off the
 -- bottom of a screen that cannot scroll, so it gets a check.
 ReadingOS._Dashboard = Dashboard
+ReadingOS._CraftView = CraftView
 
 return ReadingOS
