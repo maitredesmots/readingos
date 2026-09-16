@@ -1063,14 +1063,20 @@ function ReadingOS:showList(title, items, on_pick)
     return menu
 end
 
+--- @return boolean true if a fetch actually succeeded (fresh or acceptably-
+--- cached, self:fetch()'s own definition of "worked") and got applied to the
+--- widget; false if it didn't touch anything. executeRemoteCommand's
+--- "refresh" reports done/failed off this — the real signal fetch() already
+--- has, not a guess.
 function ReadingOS:refreshInto(dashboard)
     local data, age = self:fetch()
-    if not data then return end
+    if not data then return false end
     dashboard.data = data
     dashboard.age = age
     dashboard.hit = {}
     dashboard[1] = dashboard:build()
     UIManager:setDirty(dashboard, "full")
+    return true
 end
 
 --- Rule 3: the receipt lands before the network is touched.
@@ -3119,14 +3125,17 @@ local function fetchNextCommand(id)
 end
 
 --- @return boolean won true only if this tick is the one that gets to execute
---- the command — a 409 (already acked/expired by a retried poll) means no.
-local function ackCommand(cmdId)
-    local res = request("POST", baseUrl() .. "/api/readingos/phone/command/" .. tostring(cmdId) .. "/ack")
+--- the command — a 409 (already acked/expired by a retried poll, or owned by
+--- a different device) means no. `deviceId` lets the server verify this
+--- command actually belongs to the caller, not just that the caller holds
+--- the shared bearer token.
+local function ackCommand(cmdId, deviceId)
+    local res = request("POST", baseUrl() .. "/api/readingos/phone/command/" .. tostring(cmdId) .. "/ack?device=" .. deviceId)
     return res ~= nil
 end
 
-local function postCommandResult(cmdId, status, result)
-    request("POST", baseUrl() .. "/api/readingos/phone/command/" .. tostring(cmdId) .. "/result",
+local function postCommandResult(cmdId, deviceId, status, result)
+    request("POST", baseUrl() .. "/api/readingos/phone/command/" .. tostring(cmdId) .. "/result?device=" .. deviceId,
         encode({ status = status, result = result }))
 end
 
@@ -3149,6 +3158,15 @@ local REMOTE_BLOCKED_SCREENS = {
 --- `readingos_screen` (set in each screen's :init(), see Dashboard/TaskDetail/
 --- LearnView/CraftView/LockView/showList's Menu above) — the book reader,
 --- KOReader's own dialogs, and anything else underneath are never reached.
+--- "done" means: the operation this command maps to actually happened, by
+--- whatever signal that operation already exposes — not merely "the dispatch
+--- call didn't throw". back/close/next/prev are synchronous, in-memory,
+--- KOReader UI-stack operations with no network step and no failure mode
+--- this codebase exposes, so a non-throwing call already IS the strongest
+--- available proof they ran. home/refresh both go through self:fetch()'s
+--- network call, which already has a real success/failure signal (fresh or
+--- acceptably-cached data vs nil) — that signal is what decides done/failed
+--- for them, never assumed.
 --- @return string status "done" or "failed"
 --- @return string|nil result short label, nil on a plain success
 local function executeRemoteCommand(plugin, cmd)
@@ -3168,11 +3186,23 @@ local function executeRemoteCommand(plugin, cmd)
             guard = guard + 1
             if guard > 20 then return "failed", "error" end -- stack never settled; give up rather than loop forever
             local w = UIManager:getTopmostVisibleWidget()
-            if not w or not w.readingos_screen or REMOTE_BLOCKED_SCREENS[w.readingos_screen] then break end
+            -- Defensive: no current call site ever nests LockView beneath
+            -- another ReadingOS screen (it's only ever opened standalone),
+            -- but if that ever changed, Home must stop and refuse right
+            -- here — never fall through to showDashboard() below, which
+            -- would otherwise paint Dashboard over/instead of a screen this
+            -- loop deliberately didn't close.
+            if w and w.readingos_screen and REMOTE_BLOCKED_SCREENS[w.readingos_screen] then
+                return "failed", "locked"
+            end
+            if not w or not w.readingos_screen then break end
             if w.readingos_screen == "dashboard" then return "done", "noop" end
             if w.onClose then w:onClose() else UIManager:close(w) end
         end
-        plugin:showDashboard()
+        -- showDashboard() returns false without showing anything when its
+        -- own fetch fails — that's a real failure, not a thrown error, so
+        -- pcall alone would never have caught it.
+        if not plugin:showDashboard() then return "failed", "network_error" end
         return "done", nil
     end
 
@@ -3197,7 +3227,9 @@ local function executeRemoteCommand(plugin, cmd)
     if cmd == "refresh" then
         -- V2 scope: Dashboard only, via its own existing refreshInto().
         if not top or top.readingos_screen ~= "dashboard" then return "failed", "unsupported_on_screen" end
-        plugin:refreshInto(top)
+        -- Same real signal as home above: refreshInto() returns false
+        -- without touching the widget when its own fetch fails.
+        if not plugin:refreshInto(top) then return "failed", "network_error" end
         return "done", nil
     end
 
@@ -3316,7 +3348,7 @@ function ReadingOS:showPhone()
                 -- ever calls executeRemoteCommand, so a retried/duplicate
                 -- poll can never double-execute the same command.
                 local cmd = fetchNextCommand(id)
-                if cmd and cmd.id and cmd.cmd and ackCommand(cmd.id) then
+                if cmd and cmd.id and cmd.cmd and ackCommand(cmd.id, id) then
                     -- pcall: a bad/unexpected screen state inside dispatch
                     -- must never take the heartbeat/pairing tick down with
                     -- it. Result is posted via scheduleIn(0, ...) rather than
@@ -3330,9 +3362,9 @@ function ReadingOS:showPhone()
                     local cmd_id = cmd.id
                     UIManager:scheduleIn(0, function()
                         if ok then
-                            postCommandResult(cmd_id, status, result)
+                            postCommandResult(cmd_id, id, status, result)
                         else
-                            postCommandResult(cmd_id, "failed", "error")
+                            postCommandResult(cmd_id, id, "failed", "error")
                         end
                     end)
                 end
@@ -3389,18 +3421,24 @@ end
 
 -- ------------------------------------------------------------------- entry
 
+--- @return boolean true only if Dashboard was actually shown (a real fetch
+--- succeeded, per self:fetch()'s own fresh-or-acceptably-cached definition).
+--- executeRemoteCommand's "home" reports done/failed off this — every
+--- existing caller (menu callback, onShowReadingOS, the Dispatcher action)
+--- already discards the return value, so this is not a behavior change for
+--- any of them.
 function ReadingOS:showDashboard()
     if getToken() == "" then
         UIManager:show(InfoMessage:new {
             text = _("Brak tokenu API. Wrzuć readingos-token.txt do folderu koreader albo ustaw go w Narzędzia → ReadingOS."),
         })
-        return
+        return false
     end
 
     local data, age, err = self:fetch()
     if not data then
         UIManager:show(InfoMessage:new { text = _("ReadingOS nieosiągalny: ") .. tostring(err or "?") })
-        return
+        return false
     end
 
     -- The radio is already up from the fetch above, so noticing a new version
@@ -3421,6 +3459,7 @@ function ReadingOS:showDashboard()
 
     track("home", "open", age and "cached" or "fresh")
     UIManager:show(Dashboard:new { data = data, age = age, plugin = self }, "full")
+    return true
 end
 
 function ReadingOS:onShowReadingOS()
