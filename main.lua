@@ -647,13 +647,10 @@ function Dashboard:build()
         end
         if weather.stale then weather_text = weather_text .. " ·" end
     end
-    local ok_wifi, is_wifi = pcall(function() return NetworkMgr:isWifiOn() end)
-    local wifi_text = (ok_wifi and is_wifi) and "WiFi" or "WiFi ×"
     local ok_batt, capacity = pcall(function() return Device:getPowerDevice():getCapacity() end)
     local batt_text = (ok_batt and type(capacity) == "number") and (capacity .. "%") or "—"
     local header_parts = { os.date("%H:%M"), plDate() }
     if weather_text ~= "" then header_parts[#header_parts + 1] = weather_text end
-    header_parts[#header_parts + 1] = wifi_text
     header_parts[#header_parts + 1] = batt_text
 
     local close_glyph = TextWidget:new { text = "✕ ZAMKNIJ", face = face(SIZE_LABEL) }
@@ -670,6 +667,35 @@ function Dashboard:build()
             },
         } }, h_label, { kind = "close", label = "close", x2 = pad + close_w })
     add(rule(cw), Screen:scaleBySize(2))
+    gap(8)
+
+    -- ---- Wi-Fi. Own row, not squeezed into the header glance line — always
+    -- shown, since "not connected" is as worth knowing at a look as "connected".
+    -- Every call here is local (sysfs read / getifaddrs / lipc to wifid), never
+    -- a network round trip — same pcall-degrades-to-"—" contract as the rest of
+    -- this header block. Deliberately NOT using NetworkMgr:isOnline(), which
+    -- resolves an external hostname with no Lua-side timeout: exactly the kind
+    -- of thing that could hang the whole dashboard on a bad network.
+    local ok_wifi_on, wifi_on = pcall(function() return NetworkMgr:isWifiOn() end)
+    local wifi_right
+    if not ok_wifi_on then
+        wifi_right = "—"
+    elseif not wifi_on then
+        wifi_right = "○ Wi-Fi wyłączone"
+    else
+        local ok_conn, connected = pcall(function() return NetworkMgr:isConnected() end)
+        if not ok_conn then
+            wifi_right = "—"
+        elseif not connected then
+            wifi_right = "○ Brak połączenia"
+        else
+            local ok_net, net = pcall(function() return NetworkMgr:getCurrentNetwork() end)
+            local ssid = (ok_net and type(net) == "table" and net.ssid and net.ssid ~= "") and net.ssid or nil
+            wifi_right = ssid and ("● Połączono · " .. ssid) or "● Połączono"
+        end
+    end
+    add(lrRow(cw, h_meta, "Wi-Fi", wifi_right, face(SIZE_META), face(SIZE_META), false),
+        h_meta, { kind = "wifi", label = "wifi" })
     gap(8)
 
     -- ---- undo. A tap on e-ink lands a row off more often than on a phone, so
