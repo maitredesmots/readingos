@@ -635,9 +635,9 @@ function Dashboard:build()
     -- screen — always here, never absent even on an empty dashboard, and
     -- deliberately not part of bottom nav (that is navigation WITHIN
     -- ReadingOS; this leaves it). Rest of the line stays Rule 4 (inert glance,
-    -- no marker, no reaction): device data (Wi-Fi, battery) comes from
-    -- KOReader's own APIs, never a network round trip — pcall'd because a
-    -- hardware quirk must degrade to "—", not crash the whole dashboard.
+    -- no marker, no reaction): device data (Wi-Fi, version, battery) comes
+    -- from KOReader's own APIs, never a network round trip — pcall'd because
+    -- a hardware quirk must degrade to "—", not crash the whole dashboard.
     local weather = d.weather
     local weather_text = ""
     if type(weather) == "table" and weather.temp then
@@ -647,10 +647,50 @@ function Dashboard:build()
         end
         if weather.stale then weather_text = weather_text .. " ·" end
     end
+
+    -- Wi-Fi: name (SSID when connected, the word "Wi-Fi" otherwise — off and
+    -- disconnected read the same at a glance here, on purpose; either way is
+    -- "not connected") plus a dot. No icon: this plugin has no icon font, only
+    -- glyphs already proven to render (●/○ among them) — see the audit note
+    -- above CraftView for why one is never assumed to render untested.
+    -- Every call here is local (sysfs read / getifaddrs / lipc to wifid),
+    -- never a network round trip. Deliberately NOT using NetworkMgr:isOnline(),
+    -- which resolves an external hostname with no Lua-side timeout: exactly
+    -- the kind of thing that could hang the whole dashboard on a bad network.
+    local ok_wifi_on, wifi_on = pcall(function() return NetworkMgr:isWifiOn() end)
+    local wifi_text
+    if not ok_wifi_on then
+        wifi_text = "—"
+    elseif not wifi_on then
+        wifi_text = "Wi-Fi ○"
+    else
+        local ok_conn, connected = pcall(function() return NetworkMgr:isConnected() end)
+        if not ok_conn then
+            wifi_text = "—"
+        elseif not connected then
+            wifi_text = "Wi-Fi ○"
+        else
+            local ok_net, net = pcall(function() return NetworkMgr:getCurrentNetwork() end)
+            local ssid = (ok_net and type(net) == "table" and net.ssid and net.ssid ~= "") and net.ssid or nil
+            wifi_text = (ssid or "Wi-Fi") .. " ●"
+        end
+    end
+
+    -- Version + update: what used to only live in the WIĘCEJ menu and the
+    -- separate AKTUALIZACJA banner (kept below, unchanged, for the actual
+    -- install action) — here it's just the glance answer to "am I current".
+    local ok_ver, local_version = pcall(function() return self.plugin:localVersion() end)
+    local version_text = "v" .. (ok_ver and local_version or "?")
+    if self.plugin.update_ready then
+        version_text = version_text .. " → v" .. tostring(self.plugin.update_ready)
+    end
+
     local ok_batt, capacity = pcall(function() return Device:getPowerDevice():getCapacity() end)
     local batt_text = (ok_batt and type(capacity) == "number") and (capacity .. "%") or "—"
     local header_parts = { os.date("%H:%M"), plDate() }
     if weather_text ~= "" then header_parts[#header_parts + 1] = weather_text end
+    header_parts[#header_parts + 1] = wifi_text
+    header_parts[#header_parts + 1] = version_text
     header_parts[#header_parts + 1] = batt_text
 
     local close_glyph = TextWidget:new { text = "✕ ZAMKNIJ", face = face(SIZE_LABEL) }
@@ -667,35 +707,6 @@ function Dashboard:build()
             },
         } }, h_label, { kind = "close", label = "close", x2 = pad + close_w })
     add(rule(cw), Screen:scaleBySize(2))
-    gap(8)
-
-    -- ---- Wi-Fi. Own row, not squeezed into the header glance line — always
-    -- shown, since "not connected" is as worth knowing at a look as "connected".
-    -- Every call here is local (sysfs read / getifaddrs / lipc to wifid), never
-    -- a network round trip — same pcall-degrades-to-"—" contract as the rest of
-    -- this header block. Deliberately NOT using NetworkMgr:isOnline(), which
-    -- resolves an external hostname with no Lua-side timeout: exactly the kind
-    -- of thing that could hang the whole dashboard on a bad network.
-    local ok_wifi_on, wifi_on = pcall(function() return NetworkMgr:isWifiOn() end)
-    local wifi_right
-    if not ok_wifi_on then
-        wifi_right = "—"
-    elseif not wifi_on then
-        wifi_right = "○ Wi-Fi wyłączone"
-    else
-        local ok_conn, connected = pcall(function() return NetworkMgr:isConnected() end)
-        if not ok_conn then
-            wifi_right = "—"
-        elseif not connected then
-            wifi_right = "○ Brak połączenia"
-        else
-            local ok_net, net = pcall(function() return NetworkMgr:getCurrentNetwork() end)
-            local ssid = (ok_net and type(net) == "table" and net.ssid and net.ssid ~= "") and net.ssid or nil
-            wifi_right = ssid and ("● Połączono · " .. ssid) or "● Połączono"
-        end
-    end
-    add(lrRow(cw, h_meta, "Wi-Fi", wifi_right, face(SIZE_META), face(SIZE_META), false),
-        h_meta, { kind = "wifi", label = "wifi" })
     gap(8)
 
     -- ---- undo. A tap on e-ink lands a row off more often than on a phone, so
@@ -786,106 +797,88 @@ function Dashboard:build()
     add(rule(cw, true), Screen:scaleBySize(1))
     gap(10)
 
-    -- ---- half/half rows. Same column geometry as the old NAUKA/DIG tiles,
-    -- generalised: a label, up to 2 preview lines (narrower column than a
-    -- full-width section, so one row tighter than the 3-row cap elsewhere),
-    -- or a quiet_text when there is nothing to show. No border, no card — an
-    -- open column, the pairing line itself is the only separator.
-    local bw = math.floor((cw - Screen:scaleBySize(12)) / 2)
+    -- ---- section cards. DOM / CO CZYTAM / ZAKUPY / CRAFTSSS each get their
+    -- own full-width bordered card, one under the other — same bordersize/
+    -- padding/no-fill/radius=0 box the "undo" row above already uses, so
+    -- this isn't a new visual element, just the existing one reused wider.
+    -- (ZADANIA stays unboxed, list-style, above — that matches the sketch:
+    -- the card border marks "a summary of something else", not a plain list.)
+    local card_pad = Screen:scaleBySize(12)
+    local card_inner_w = cw - 2 * card_pad
 
-    local function halfList(label, items, quiet_text, count_label)
+    local function card(label, count_label, body, target)
         local head = label
         if count_label and count_label ~= "" then head = label .. "   " .. count_label end
-        local group = VerticalGroup:new { align = "left",
-            TextWidget:new { text = head, face = face(SIZE_HEAD), max_width = bw } }
+        local inner = VerticalGroup:new { align = "left",
+            lrRow(card_inner_w, h_head, head, ">", face(SIZE_HEAD), face(SIZE_HEAD)),
+            VerticalSpan:new { width = Screen:scaleBySize(6) },
+            body,
+        }
+        add(FrameContainer:new {
+            bordersize = Screen:scaleBySize(1), padding = card_pad, width = cw, radius = 0,
+            inner,
+        }, 0, target)
+        gap(10)
+    end
+
+    local function listBody(items, quiet_text)
         if #items == 0 then
+            return TextWidget:new {
+                text = quiet_text, face = face(SIZE_META), fgcolor = Blitbuffer.COLOR_GRAY_5,
+                max_width = card_inner_w }
+        end
+        local group = VerticalGroup:new { align = "left" }
+        for i = 1, math.min(3, #items) do
             table.insert(group, TextWidget:new {
-                text = quiet_text, face = face(SIZE_META), fgcolor = Blitbuffer.COLOR_GRAY_5, max_width = bw })
-        else
-            for i = 1, math.min(2, #items) do
-                table.insert(group, TextWidget:new {
-                    text = "  " .. rowText(items[i]), face = face(SIZE_ROW), max_width = bw })
-            end
+                text = "  " .. rowText(items[i]), face = face(SIZE_ROW), max_width = card_inner_w })
         end
         return group
     end
 
-    -- DOM + CO CZYTAM
+    -- DOM
     do
         local house = d.house or {}
-        -- Both containers span the FULL row width (cw), not half each: Left/
-        -- RightContainer align their *content* to an edge of their own box —
-        -- give them only bw and Right's "push to the right edge" math has
-        -- nowhere to push to, and both columns paint on top of each other.
-        local left = LeftContainer:new { dimen = { w = cw, h = 1 }, -- height fixed up after measuring both
-            halfList("DOM", house, "wszystko jest", totals.house and totals.house > 0 and tostring(totals.house) or nil) }
+        card("DOM", totals.house and totals.house > 0 and tostring(totals.house) or nil,
+            listBody(house, "wszystko jest"), { screen = "house", label = "house" })
+    end
 
+    -- CO CZYTAM
+    do
         local book = self.plugin:currentBook(d)
-        local right_group = VerticalGroup:new { align = "left",
-            TextWidget:new { text = book.title, face = face(SIZE_HEAD), max_width = bw } }
+        local body = VerticalGroup:new { align = "left",
+            TextWidget:new { text = book.title, face = face(SIZE_ROW), max_width = card_inner_w } }
         if book.author ~= "" or book.percent ~= "" then
-            table.insert(right_group, TextWidget:new {
+            table.insert(body, TextWidget:new {
                 text = (book.author ~= "" and book.author or "") ..
                     (book.percent ~= "" and ("   " .. book.percent) or ""),
-                face = face(SIZE_META), fgcolor = Blitbuffer.COLOR_GRAY_5, max_width = bw })
+                face = face(SIZE_META), fgcolor = Blitbuffer.COLOR_GRAY_5, max_width = card_inner_w })
         end
         if (book.fraction or 0) > 0 then
-            table.insert(right_group, VerticalSpan:new { width = Screen:scaleBySize(4) })
-            table.insert(right_group, ProgressWidget:new {
-                width = bw, height = Screen:scaleBySize(6), percentage = book.fraction,
+            table.insert(body, VerticalSpan:new { width = Screen:scaleBySize(4) })
+            table.insert(body, ProgressWidget:new {
+                width = card_inner_w, height = Screen:scaleBySize(6), percentage = book.fraction,
                 margin_h = 0, margin_v = 0, bordersize = Screen:scaleBySize(1),
             })
         end
-        local right = RightContainer:new { dimen = { w = cw, h = 1 }, right_group }
-
-        -- Real height first: both columns must share the row's full height so
-        -- the split-hit trick below stays correct regardless of which side is
-        -- visually taller.
-        local _, lsize = pcall(function() return left[1]:getSize() end)
-        local _, rsize = pcall(function() return right[1]:getSize() end)
-        local row_h = math.max((lsize and lsize.h) or 0, (rsize and rsize.h) or 0, h_row)
-        left.dimen.h, right.dimen.h = row_h, row_h
-
-        local pair = OverlapGroup:new { dimen = { w = cw, h = row_h } }
-        table.insert(pair, left)
-        table.insert(pair, right)
-        addSplit(pair, row_h,
-            { screen = "house", label = "house" },
-            { kind = "continue", label = "continue" },
-            pad + bw)
+        card("CO CZYTAM", nil, body, { kind = "continue", label = "continue" })
     end
-    gap(10)
-    add(rule(cw, true), Screen:scaleBySize(1))
-    gap(10)
 
-    -- ZAKUPY + CRAFTSSS
+    -- ZAKUPY
     do
         local shopping = d.shopping or { total = 0, preview = {} }
         local shop_items = {}
         for _i, name in ipairs(shopping.preview or {}) do
             shop_items[#shop_items + 1] = { sym = "·", text = name }
         end
-        local left = LeftContainer:new { dimen = { w = cw, h = 1 },
-            halfList("ZAKUPY", shop_items, "lista pusta",
-                (shopping.total or 0) > 0 and tostring(shopping.total) or nil) }
+        card("ZAKUPY", (shopping.total or 0) > 0 and tostring(shopping.total) or nil,
+            listBody(shop_items, "lista pusta"), { screen = "shopping", label = "shopping" })
+    end
 
+    -- CRAFTSSS
+    do
         local crafts = d.crafts or {}
-        local right = RightContainer:new { dimen = { w = cw, h = 1 },
-            halfList("CRAFTSSS", crafts, "nic w budowie",
-                #crafts > 0 and tostring(#crafts) or nil) }
-
-        local _, lsize = pcall(function() return left[1]:getSize() end)
-        local _, rsize = pcall(function() return right[1]:getSize() end)
-        local row_h = math.max((lsize and lsize.h) or 0, (rsize and rsize.h) or 0, h_row)
-        left.dimen.h, right.dimen.h = row_h, row_h
-
-        local pair = OverlapGroup:new { dimen = { w = cw, h = row_h } }
-        table.insert(pair, left)
-        table.insert(pair, right)
-        addSplit(pair, row_h,
-            { screen = "shopping", label = "shopping" },
-            { screen = "crafts", label = "crafts" },
-            pad + bw)
+        card("CRAFTSSS", #crafts > 0 and tostring(#crafts) or nil,
+            listBody(crafts, "nic w budowie"), { screen = "crafts", label = "crafts" })
     end
 
     -- ---- footer: staleness / one rotating hint, inert, glance-only.
