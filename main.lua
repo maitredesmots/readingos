@@ -531,6 +531,82 @@ local function rowText(it)
     return table.concat(parts, "  ")
 end
 
+-- ------------------------------------------------------------------ icons
+--
+-- No icon font, no emoji: the dashboard's icons are KOReader's own SVG set
+-- (resources/icons/mdlight — the files every KOReader menu bar on this device
+-- already renders through NanoSVG), so nothing here depends on a glyph the UI
+-- font may lack. The five shapes that set has no equivalent for (cart, yarn,
+-- wallet, task list, more) are tiny inline SVGs written once to the plugin
+-- cache and rendered through the very same NanoSVG file path. Inline rather
+-- than shipped as files because OTA delivers main.lua alone (PLUGIN_FILES on
+-- the server) — a separate icon file would never reach the device.
+--
+-- Everything degrades to an empty box of the same size: a missing renderer
+-- must never shift the layout, and never crash the dashboard.
+local ok_iconw, IconWidget = pcall(require, "ui/widget/iconwidget")
+if not ok_iconw then IconWidget = nil end
+local ok_imagew, ImageWidget = pcall(require, "ui/widget/imagewidget")
+if not ok_imagew then ImageWidget = nil end
+
+local ICON_SVG = {
+    cart = [[<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48"><g fill="none" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h6l5 22h21l4-14H12"/><circle cx="18" cy="38" r="3"/><circle cx="33" cy="38" r="3"/></g></svg>]],
+    yarn = [[<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48"><g fill="none" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><circle cx="22" cy="26" r="17"/><path d="M6 22q16-2 32 8"/><path d="M8 34q14 0 28-12"/><path d="M16 11q4 16 14 31"/><path d="M32 6l12 12"/></g></svg>]],
+    wallet = [[<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48"><g fill="none" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="12" width="38" height="26" rx="3"/><path d="M5 19h38"/><rect x="29" y="24" width="14" height="8" rx="2"/></g><circle cx="35" cy="28" r="1.8" fill="#000000"/></svg>]],
+    tasks = [[<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48"><g fill="none" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12h25M19 24h25M19 36h25"/><path d="M5 12l3 3 6-6M5 24l3 3 6-6M5 36l3 3 6-6"/></g></svg>]],
+    more = [[<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48"><g fill="#000000"><circle cx="11" cy="24" r="4"/><circle cx="24" cy="24" r="4"/><circle cx="37" cy="24" r="4"/></g></svg>]],
+}
+local ICON_DIR = DataStorage:getDataDir() .. "/cache/readingos-icons"
+
+--- Path of the cached SVG for an inline icon, written on first use (or when
+--- the shape changed size, i.e. after an update). nil when the cache dir is
+--- not writable — the caller then draws the empty box instead.
+local function iconFile(name, svg)
+    local path = ICON_DIR .. "/" .. name .. ".svg"
+    local ok, size = pcall(function() return lfs.attributes(path, "size") end)
+    if ok and size == #svg then return path end
+    pcall(function() lfs.mkdir(ICON_DIR) end)
+    local fh = io.open(path, "w")
+    if not fh then return nil end
+    fh:write(svg)
+    fh:close()
+    return path
+end
+
+--- A square icon `size` px wide: a KOReader icon by name, or one of ICON_SVG.
+local function icon(name, size)
+    local ok, w = pcall(function()
+        local svg = ICON_SVG[name]
+        if svg then
+            local file = iconFile(name, svg)
+            if not (file and IconWidget) then return nil end
+            return IconWidget:new { file = file, width = size, height = size }
+        end
+        if not IconWidget then return nil end
+        return IconWidget:new { icon = name, width = size, height = size }
+    end)
+    if ok and w then return w end
+    return CenterContainer:new { dimen = Geom:new { w = size, h = size }, HorizontalSpan:new { width = size } }
+end
+
+--- The battery glance: a body filled to the charge level plus the nub. Drawn
+--- from ProgressWidget + LineWidget rather than a glyph — nothing to verify
+--- on the panel, and it reads at a glance the way the phone's does.
+local function batteryIcon(fraction, h)
+    local body_w = math.floor(h * 2)
+    return HorizontalGroup:new {
+        ProgressWidget:new {
+            width = body_w, height = h, percentage = fraction,
+            margin_h = 0, margin_v = 0, radius = Screen:scaleBySize(1),
+            bordersize = Screen:scaleBySize(1), fillcolor = Blitbuffer.COLOR_BLACK,
+        },
+        LineWidget:new {
+            dimen = Geom:new { w = Screen:scaleBySize(2), h = math.floor(h / 2) },
+            background = Blitbuffer.COLOR_BLACK,
+        },
+    }
+end
+
 --[[ The dashboard.
 
      Rows register their screen-space y range as they are laid out, so a tap is
@@ -575,16 +651,17 @@ function Dashboard:claim(y, height, target)
     return y + height
 end
 
---- HEADER (Wi-Fi/version/battery, own bounded region — see lrRow split
---- below), ZADANIA (full width, top priority, unboxed list), then DOM /
---- CO CZYTAM / ZAKUPY / CRAFTSSS as individual full-width bordered cards,
---- one under the other (2026-09-18 redesign — replaced the old DOM+CO CZYTAM
---- / ZAKUPY+CRAFTSSS half/half column pairing), BOTTOM NAV (pinned).
---- NAUKA/DIG/Help/Notatki/Artykuły moved off the main surface into WIĘCEJ —
---- the screens themselves (openScreen "learn"/"dig"/"help") are untouched,
---- only their entry point relocated. Rachunki/Notatki/Artykuły have no data
---- source yet (Phase 1), so their bottom-nav/menu entries are a plain "soon"
---- message — never a fake preview built to fill space.
+--- HEADER (one bordered strip: clock | date | weather | Wi-Fi icon + SSID +
+--- dot | version | battery — vertical rules between, the SSID the only part
+--- that may truncate), then ZADANIA as one bordered card (attention row,
+--- summary, three rows, chevron), then DOM / CO CZYTAM / ZAKUPY / CRAFTSSS
+--- as full-width bordered cards with an icon column (the current book's real
+--- cover for CO CZYTAM), then a six-item icon BOTTOM NAV pinned to the
+--- bottom, ZAMKNIJ first (2026-09-18 redesign, reference mock). NAUKA/DIG/
+--- Help/Notatki/Artykuły live in WIĘCEJ — the screens themselves (openScreen
+--- "learn"/"dig"/"help") are untouched, only their entry point relocated.
+--- Rachunki/Notatki/Artykuły have no data source yet (Phase 1), so their
+--- bottom-nav/menu entries are a plain "soon" message — never a fake preview.
 function Dashboard:build()
     local W, H = Screen:getWidth(), Screen:getHeight()
     local pad = Screen:scaleBySize(18)
@@ -597,10 +674,18 @@ function Dashboard:build()
     -- MIN_TAP so shrinking the font makes the dashboard denser rather than
     -- unusable — at 50 % an unclamped row would be a ~16 px target.
     local h_label = Screen:scaleBySize(SIZE_LABEL * 2 * FONT_SCALE)
-    local h_head = Screen:scaleBySize(SIZE_HEAD * 2 * FONT_SCALE)
     local h_row = math.max(MIN_TAP, Screen:scaleBySize(SIZE_ROW * 2 * FONT_SCALE))
-    local h_title = Screen:scaleBySize(SIZE_TITLE * 1.7 * FONT_SCALE)
     local h_meta = Screen:scaleBySize(SIZE_META * 1.7 * FONT_SCALE)
+
+    local bord = Screen:scaleBySize(1)
+    local card_pad = Screen:scaleBySize(9)
+    local iw = cw - 2 * (bord + card_pad) -- width inside any card
+    local gray = Blitbuffer.COLOR_GRAY_5
+
+    local function size(widget, fallback)
+        local ok, s = pcall(function() return widget:getSize() end)
+        return (ok and s and s.h and s.h > 0) and s or { w = fallback or 0, h = fallback or 0 }
+    end
 
     -- The height passed in is what the row was *asked* for; what a widget then
     -- renders can differ (a FrameContainer adds its own border and padding, a
@@ -611,8 +696,7 @@ function Dashboard:build()
     -- column stays honest, top to bottom.
     local function add(widget, height, target)
         rows[#rows + 1] = widget
-        local ok, size = pcall(function() return widget:getSize() end)
-        local real = (ok and size and size.h and size.h > 0) and size.h or height
+        local real = size(widget, height).h
         if target then y = self:claim(y, real, target) else y = y + real end
     end
     local function gap(px)
@@ -620,63 +704,81 @@ function Dashboard:build()
         rows[#rows + 1] = VerticalSpan:new { width = h }
         y = y + h
     end
-    -- Register a full-width row's own real height as two independent hit
-    -- targets split at the midpoint — the exact trick the old NAUKA/DIG tile
-    -- row used, now named and reused for every half/half pairing below.
-    local function addSplit(widget, height, left_target, right_target, mid_x)
-        rows[#rows + 1] = widget
-        local ok, size = pcall(function() return widget:getSize() end)
-        local real = (ok and size and size.h and size.h > 0) and size.h or height
-        local ty = y
-        y = y + real
-        left_target.y1, left_target.y2, left_target.x2 = ty, y, mid_x
-        right_target.y1, right_target.y2, right_target.x1 = ty, y, mid_x
-        self.hit[#self.hit + 1] = left_target
-        self.hit[#self.hit + 1] = right_target
+    local function vline(h)
+        return LineWidget:new { dimen = Geom:new { w = bord, h = h }, background = Blitbuffer.COLOR_BLACK }
+    end
+    local function hline(w)
+        return LineWidget:new { dimen = Geom:new { w = w, h = bord }, background = Blitbuffer.COLOR_BLACK }
+    end
+    local function text(s, f, opts)
+        opts = opts or {}
+        return TextWidget:new { text = s, face = f, bold = opts.bold, max_width = opts.max_width,
+            fgcolor = opts.gray and gray or nil }
+    end
+    --- One row of a card: left text, optional right widget, fixed height.
+    local function cardRow(h, left, right)
+        local group = OverlapGroup:new { dimen = Geom:new { w = iw, h = h } }
+        table.insert(group, LeftContainer:new { dimen = Geom:new { w = iw, h = h }, left })
+        if right then
+            table.insert(group, RightContainer:new { dimen = Geom:new { w = iw, h = h }, right })
+        end
+        return group
     end
 
-    -- ---- header. ✕ ZAMKNIJ on the left is the one way out of the whole
-    -- screen — always here, never absent even on an empty dashboard, and
-    -- deliberately not part of bottom nav (that is navigation WITHIN
-    -- ReadingOS; this leaves it). Rest of the line stays Rule 4 (inert glance,
-    -- no marker, no reaction): device data (Wi-Fi, version, battery) comes
-    -- from KOReader's own APIs, never a network round trip — pcall'd because
-    -- a hardware quirk must degrade to "—", not crash the whole dashboard.
+    --- A bordered card built from rows, each row optionally its own tap
+    --- target. Hit regions come from each row's measured height at its real
+    --- offset inside the frame (border + padding) — the same measure-don't-
+    --- guess rule add() follows for the column as a whole. Rows register
+    --- before the card-wide target, so a row wins over the card's padding.
+    local function addCard(items, whole_target)
+        local group = VerticalGroup:new { align = "left" }
+        for _i, it in ipairs(items) do table.insert(group, it.widget) end
+        local frame = FrameContainer:new { bordersize = bord, padding = card_pad, width = cw, radius = 0, group }
+        rows[#rows + 1] = frame
+        local real = size(frame).h
+        local top = y
+        local ry = top + bord + card_pad
+        for _i, it in ipairs(items) do
+            local h = size(it.widget).h
+            if it.target then self:claim(ry, h, it.target) end
+            ry = ry + h
+        end
+        if whole_target then self:claim(top, real, whole_target) end
+        y = top + real
+    end
+
+    -- ---- header. Rule 4 (inert glance, no marker, no reaction): device data
+    -- (Wi-Fi, version, battery) comes from KOReader's own APIs, never a
+    -- network round trip — pcall'd because a hardware quirk must degrade to
+    -- "—", not crash the whole dashboard. ZAMKNIJ is no longer up here: the
+    -- close action is the first, largest bottom-nav target instead.
     local weather = d.weather
     local weather_text = ""
     if type(weather) == "table" and weather.temp then
-        weather_text = string.format("%d°", weather.temp)
-        if weather.tmin and weather.tmax then
-            weather_text = weather_text .. string.format(" (%d–%d°)", weather.tmin, weather.tmax)
-        end
+        weather_text = string.format("%d°C", weather.temp)
         if weather.stale then weather_text = weather_text .. " ·" end
     end
 
-    -- Wi-Fi: name (SSID when connected, the word "Wi-Fi" otherwise — off and
-    -- disconnected read the same at a glance here, on purpose; either way is
-    -- "not connected") plus a dot. No icon: this plugin has no icon font, only
-    -- glyphs already proven to render (●/○ among them) — see the audit note
-    -- above CraftView for why one is never assumed to render untested.
-    -- Every call here is local (sysfs read / getifaddrs / lipc to wifid),
-    -- never a network round trip. Deliberately NOT using NetworkMgr:isOnline(),
-    -- which resolves an external hostname with no Lua-side timeout: exactly
-    -- the kind of thing that could hang the whole dashboard on a bad network.
+    -- Wi-Fi: KOReader's own wifi icon, the SSID when connected (the word
+    -- "Wi-Fi" otherwise — off and disconnected read the same at a glance
+    -- here, on purpose; either way is "not connected") and a filled/empty
+    -- dot (●/○, already proven on this panel). Every call here is local
+    -- (sysfs read / getifaddrs / lipc to wifid), never a network round trip.
+    -- Deliberately NOT using NetworkMgr:isOnline(), which resolves an
+    -- external hostname with no Lua-side timeout: exactly the kind of thing
+    -- that could hang the whole dashboard on a bad network.
     local ok_wifi_on, wifi_on = pcall(function() return NetworkMgr:isWifiOn() end)
-    local wifi_text
+    local wifi_name, wifi_dot = "Wi-Fi", "○"
     if not ok_wifi_on then
-        wifi_text = "—"
-    elseif not wifi_on then
-        wifi_text = "Wi-Fi ○"
-    else
+        wifi_name, wifi_dot = "—", ""
+    elseif wifi_on then
         local ok_conn, connected = pcall(function() return NetworkMgr:isConnected() end)
         if not ok_conn then
-            wifi_text = "—"
-        elseif not connected then
-            wifi_text = "Wi-Fi ○"
-        else
+            wifi_name, wifi_dot = "—", ""
+        elseif connected then
             local ok_net, net = pcall(function() return NetworkMgr:getCurrentNetwork() end)
             local ssid = (ok_net and type(net) == "table" and net.ssid and net.ssid ~= "") and net.ssid or nil
-            wifi_text = (ssid or "Wi-Fi") .. " ●"
+            wifi_name, wifi_dot = ssid or "Wi-Fi", "●"
         end
     end
 
@@ -694,33 +796,59 @@ function Dashboard:build()
     end
 
     local ok_batt, capacity = pcall(function() return Device:getPowerDevice():getCapacity() end)
-    local batt_text = (ok_batt and type(capacity) == "number") and (capacity .. "%") or "—"
+    local has_batt = ok_batt and type(capacity) == "number"
+    local batt_text = has_batt and (capacity .. "%") or "—"
 
-    local close_glyph = TextWidget:new { text = "✕ ZAMKNIJ", face = face(SIZE_LABEL) }
-    local ok_cs, close_size = pcall(function() return close_glyph:getSize() end)
-    local close_w = (ok_cs and close_size and close_size.w) or Screen:scaleBySize(60)
-    local close_gap = Screen:scaleBySize(14)
-
-    -- The line no longer shares one max_width across everything: a long SSID
-    -- (or "v2.2.3 > v2.2.4") must never be able to push the battery/version
-    -- off-screen. lrRow reserves the right side's own measured width first
-    -- and only lets the left side (clock/date/weather/Wi-Fi — the variable-
-    -- length part) truncate into whatever room is left, same guarantee the
-    -- close button already had via close_w.
-    local left_parts = { os.date("%H:%M"), plDate() }
-    if weather_text ~= "" then left_parts[#left_parts + 1] = weather_text end
-    left_parts[#left_parts + 1] = wifi_text
-    local left_text = table.concat(left_parts, "   ")
-    local right_text = version_text .. "   " .. batt_text
-
-    add(LeftContainer:new { dimen = { w = cw, h = h_label },
-        HorizontalGroup:new {
-            close_glyph,
-            HorizontalSpan:new { width = close_gap },
-            lrRow(cw - close_w - close_gap, h_label, left_text, right_text,
-                face(SIZE_LABEL), face(SIZE_LABEL), false),
-        } }, h_label, { kind = "close", label = "close", x2 = pad + close_w })
-    add(rule(cw), Screen:scaleBySize(2))
+    -- Fixed segments are measured first and reserve their own width; the
+    -- Wi-Fi segment gets whatever is left and truncates the SSID inside it.
+    -- So a long SSID (or "v2.2.5 > v2.2.6") can shorten only the SSID —
+    -- never push version or battery off the right edge.
+    local hdr_h = Screen:scaleBySize(40)
+    local seg_pad = Screen:scaleBySize(12)
+    local hdr_ico = Screen:scaleBySize(20)
+    local hdr_gap = Screen:scaleBySize(6)
+    local f_hdr = face(SIZE_ROW)
+    local batt_widget = HorizontalGroup:new { text(batt_text, f_hdr) }
+    if has_batt then
+        table.insert(batt_widget, HorizontalSpan:new { width = hdr_gap })
+        table.insert(batt_widget, batteryIcon(math.max(0, math.min(capacity, 100)) / 100, Screen:scaleBySize(11)))
+    end
+    local segs = {
+        { widget = text(os.date("%H:%M"), face(SIZE_TITLE), { bold = true }) },
+        { widget = text(plDate(), f_hdr) },
+    }
+    if weather_text ~= "" then segs[#segs + 1] = { widget = text(weather_text, f_hdr) } end
+    segs[#segs + 1] = { flex = true }
+    segs[#segs + 1] = { widget = text(version_text, f_hdr) }
+    segs[#segs + 1] = { widget = batt_widget }
+    local hdr_inner = cw - 2 * bord
+    local used = (#segs - 1) * bord
+    for _i, s in ipairs(segs) do
+        if not s.flex then
+            s.w = size(s.widget).w + 2 * seg_pad
+            used = used + s.w
+        end
+    end
+    local wifi_w = math.max(Screen:scaleBySize(40), hdr_inner - used)
+    -- Whatever the fixed segments measured, the strip is exactly cw wide:
+    -- the flex segment absorbs rounding, never the border.
+    local ssid_room = math.max(Screen:scaleBySize(20), wifi_w - 2 * seg_pad - hdr_ico - 2 * hdr_gap
+        - size(text(wifi_dot, f_hdr)).w)
+    local wifi_widget = HorizontalGroup:new {
+        icon("wifi", hdr_ico),
+        HorizontalSpan:new { width = hdr_gap },
+        text(wifi_name, f_hdr, { max_width = ssid_room }),
+        HorizontalSpan:new { width = hdr_gap },
+        text(wifi_dot, f_hdr),
+    }
+    local header = HorizontalGroup:new {}
+    for i, s in ipairs(segs) do
+        if i > 1 then table.insert(header, vline(hdr_h)) end
+        local w = s.flex and wifi_w or s.w
+        table.insert(header, CenterContainer:new {
+            dimen = Geom:new { w = w, h = hdr_h }, s.flex and wifi_widget or s.widget })
+    end
+    add(FrameContainer:new { bordersize = bord, padding = 0, width = cw, radius = 0, header }, hdr_h)
     gap(8)
 
     -- ---- undo. A tap on e-ink lands a row off more often than on a phone, so
@@ -728,39 +856,9 @@ function Dashboard:build()
     local undo = d.undo
     if type(undo) == "table" and undo.label then
         add(FrameContainer:new {
-            bordersize = Screen:scaleBySize(1),
-            padding = Screen:scaleBySize(5),
-            width = cw,
-            radius = 0,
-            TextWidget:new {
-                text = "COFNIJ: " .. tostring(undo.label),
-                face = face(SIZE_META),
-                max_width = cw - Screen:scaleBySize(20),
-            },
+            bordersize = bord, padding = Screen:scaleBySize(5), width = cw, radius = 0,
+            text("COFNIJ: " .. tostring(undo.label), face(SIZE_META), { max_width = cw - Screen:scaleBySize(20) }),
         }, h_meta + Screen:scaleBySize(12), { kind = "undo", label = tostring(undo.label) })
-        gap(8)
-    end
-
-    -- ---- attention band, only when something is genuinely late
-    local dig = d.dig or {}
-    local overdue, out = 0, 0
-    for _i, t in ipairs(d.tasks or {}) do if t.sym == "▲" then overdue = overdue + 1 end end
-    for _i, hh in ipairs(d.house or {}) do if hh.state == "out" then out = out + 1 end end
-    if overdue > 0 or out > 0 then
-        local parts = {}
-        if overdue > 0 then parts[#parts + 1] = overdue .. " PO TERMINIE" end
-        if out > 0 then parts[#parts + 1] = out .. " BRAK" end
-        add(FrameContainer:new {
-            background = Blitbuffer.COLOR_BLACK,
-            bordersize = 0,
-            padding = Screen:scaleBySize(4),
-            width = cw,
-            TextWidget:new {
-                text = "▲ " .. table.concat(parts, " · "),
-                face = face(SIZE_META),
-                fgcolor = Blitbuffer.COLOR_WHITE,
-            },
-        }, h_meta, { screen = overdue > 0 and "tasks" or "house", label = "attention" })
         gap(8)
     end
 
@@ -773,31 +871,14 @@ function Dashboard:build()
         gap(8)
     end
 
-    -- ---- ZADANIA. Full width, first section — the largest surface on the
-    -- screen, same 3-row/quiet-collapse rule as every other section below.
-    local function section(key, label, items, quiet_text, total, summary)
-        local head = label
-        if summary and summary ~= "" then
-            head = label .. "   " .. summary
-        elseif total and total > #items then
-            head = label .. "   " .. total
-        end
-        if #items == 0 then
-            add(lrRow(cw, h_row, head, quiet_text .. "   >", face(SIZE_HEAD), face(SIZE_META), true),
-                h_row, { screen = key, label = key })
-        else
-            add(lrRow(cw, h_head, head, ">", face(SIZE_HEAD), face(SIZE_HEAD)),
-                h_head, { screen = key, label = key })
-            add(rule(cw, true), Screen:scaleBySize(1))
-            gap(4)
-            for i = 1, math.min(3, #items) do
-                local it = items[i]
-                add(lrRow(cw, h_row, "  " .. rowText(it), it.meta,
-                    face(SIZE_ROW), face(SIZE_META), true),
-                    h_row, { kind = it.kind, id = it.id, screen = key, label = it.text, row = it })
-            end
-        end
-    end
+    -- ---- ZADANIA card: attention row (only when something is genuinely
+    -- late), the horizon summary, then up to three rows — one border around
+    -- all of it. The chevron sits on the top row, whichever that is.
+    local chev = Screen:scaleBySize(18)
+    local f_head = face(SIZE_HEAD)
+    local overdue, out = 0, 0
+    for _i, t in ipairs(d.tasks or {}) do if t.sym == "▲" then overdue = overdue + 1 end end
+    for _i, hh in ipairs(d.house or {}) do if hh.state == "out" then out = out + 1 end end
 
     local totals = d.totals or {}
     local tb = totals.task_buckets or {}
@@ -805,76 +886,147 @@ function Dashboard:build()
     if (tb.past or 0) > 0 then tparts[#tparts + 1] = tb.past .. " zaległe" end
     if (tb.today or 0) > 0 then tparts[#tparts + 1] = tb.today .. " dziś" end
     if (tb.tmrw or 0) > 0 then tparts[#tparts + 1] = tb.tmrw .. " jutro" end
-    section("tasks", "ZADANIA", d.preview_tasks or d.tasks or {}, "nic na mnie",
-        totals.tasks, table.concat(tparts, " · "))
-    gap(10)
-    add(rule(cw, true), Screen:scaleBySize(1))
-    gap(10)
+    local summary = table.concat(tparts, " · ")
+    if summary == "" and totals.tasks and totals.tasks > 0 then summary = tostring(totals.tasks) end
 
-    -- ---- section cards. DOM / CO CZYTAM / ZAKUPY / CRAFTSSS each get their
-    -- own full-width bordered card, one under the other — same bordersize/
-    -- padding/no-fill/radius=0 box the "undo" row above already uses, so
-    -- this isn't a new visual element, just the existing one reused wider.
-    -- (ZADANIA stays unboxed, list-style, above — that matches the sketch:
-    -- the card border marks "a summary of something else", not a plain list.)
-    local card_pad = Screen:scaleBySize(12)
-    local card_inner_w = cw - 2 * card_pad
-
-    local function card(label, count_label, body, target)
-        local head = label
-        if count_label and count_label ~= "" then head = label .. "   " .. count_label end
-        local inner = VerticalGroup:new { align = "left",
-            lrRow(card_inner_w, h_head, head, ">", face(SIZE_HEAD), face(SIZE_HEAD)),
-            VerticalSpan:new { width = Screen:scaleBySize(6) },
-            body,
+    local task_items = {}
+    local chevron_used = false
+    local function chevron()
+        if chevron_used then return nil end
+        chevron_used = true
+        return icon("chevron.right", chev)
+    end
+    if overdue > 0 or out > 0 then
+        local parts = {}
+        if overdue > 0 then parts[#parts + 1] = overdue .. " PO TERMINIE" end
+        if out > 0 then parts[#parts + 1] = out .. " BRAK" end
+        task_items[#task_items + 1] = {
+            widget = cardRow(h_row, text("▲  " .. table.concat(parts, " · "), f_head, { bold = true, max_width = iw - chev - hdr_gap }), chevron()),
+            target = { screen = overdue > 0 and "tasks" or "house", label = "attention" },
         }
-        add(FrameContainer:new {
-            bordersize = Screen:scaleBySize(1), padding = card_pad, width = cw, radius = 0,
-            inner,
-        }, 0, target)
+        task_items[#task_items + 1] = { widget = hline(iw) }
+    end
+    local summary_widget = HorizontalGroup:new { text("ZADANIA", f_head, { bold = true }) }
+    if summary ~= "" then
+        table.insert(summary_widget, HorizontalSpan:new { width = Screen:scaleBySize(14) })
+        table.insert(summary_widget, text(summary, f_head, { max_width = iw - chev - Screen:scaleBySize(90) }))
+    end
+    task_items[#task_items + 1] = {
+        widget = cardRow(h_row, summary_widget, chevron()),
+        target = { screen = "tasks", label = "tasks" },
+    }
+    local tasks = d.preview_tasks or d.tasks or {}
+    if #tasks == 0 then
+        task_items[#task_items + 1] = { widget = cardRow(h_row, text("nic na mnie", face(SIZE_META), { gray = true })) }
+    else
+        task_items[#task_items + 1] = { widget = hline(iw) }
+        for i = 1, math.min(3, #tasks) do
+            local it = tasks[i]
+            task_items[#task_items + 1] = {
+                widget = lrRow(iw, h_row, rowText(it), it.meta, face(SIZE_ROW), face(SIZE_META), false),
+                target = { kind = it.kind, id = it.id, screen = "tasks", label = it.text, row = it },
+            }
+        end
+    end
+    addCard(task_items)
+    gap(10)
+
+    -- ---- section cards. DOM / CO CZYTAM / ZAKUPY / CRAFTSSS: icon column,
+    -- title + count, lines, chevron — one border each, one under the other.
+    local ico = Screen:scaleBySize(34)
+    local ico_col = Screen:scaleBySize(56)
+    local chev_col = chev + Screen:scaleBySize(6)
+    local text_w = iw - ico_col - chev_col
+
+    local function cardTitle(label, count)
+        local g = HorizontalGroup:new { text(label, f_head, { bold = true }) }
+        if count and count ~= "" then
+            table.insert(g, HorizontalSpan:new { width = Screen:scaleBySize(12) })
+            table.insert(g, text(count, f_head))
+        end
+        return g
+    end
+    --- icon column | body | chevron, the body as tall as it needs to be and
+    --- the icon centred beside it. `lead` is the icon column's widget
+    --- (an icon, or the book cover) and sets the column's width.
+    local function addContentCard(lead, lead_w, body, target)
+        local body_h = math.max(size(lead).h, size(body).h)
+        local row = OverlapGroup:new { dimen = Geom:new { w = iw, h = body_h } }
+        table.insert(row, LeftContainer:new { dimen = Geom:new { w = iw, h = body_h },
+            HorizontalGroup:new {
+                CenterContainer:new { dimen = Geom:new { w = lead_w, h = body_h }, lead },
+                body,
+            } })
+        table.insert(row, RightContainer:new { dimen = Geom:new { w = iw, h = body_h },
+            icon("chevron.right", chev) })
+        addCard({ { widget = row } }, target)
         gap(10)
     end
-
-    local function listBody(items, quiet_text)
+    local function lines(items, quiet_text, width)
+        local g = VerticalGroup:new { align = "left" }
         if #items == 0 then
-            return TextWidget:new {
-                text = quiet_text, face = face(SIZE_META), fgcolor = Blitbuffer.COLOR_GRAY_5,
-                max_width = card_inner_w }
+            table.insert(g, text(quiet_text, face(SIZE_ROW), { max_width = width }))
+        else
+            for i = 1, math.min(3, #items) do
+                table.insert(g, text(rowText(items[i]), face(SIZE_ROW), { max_width = width }))
+            end
         end
-        local group = VerticalGroup:new { align = "left" }
-        for i = 1, math.min(3, #items) do
-            table.insert(group, TextWidget:new {
-                text = "  " .. rowText(items[i]), face = face(SIZE_ROW), max_width = card_inner_w })
-        end
-        return group
+        return g
+    end
+    local function body(label, count, content)
+        return VerticalGroup:new { align = "left",
+            cardTitle(label, count),
+            VerticalSpan:new { width = Screen:scaleBySize(2) },
+            content,
+        }
     end
 
     -- DOM
     do
         local house = d.house or {}
-        card("DOM", totals.house and totals.house > 0 and tostring(totals.house) or nil,
-            listBody(house, "wszystko jest"), { screen = "house", label = "house" })
+        addContentCard(icon("home", ico), ico_col,
+            body("DOM", totals.house and totals.house > 0 and tostring(totals.house) or nil,
+                lines(house, "wszystko jest ogarnięte", text_w)),
+            { screen = "house", label = "house" })
     end
 
-    -- CO CZYTAM
+    -- CO CZYTAM: the book's real cover where the other cards have an icon.
+    -- No cover on this device (not in the cover browser's cache, no open
+    -- document) → KOReader's own book icon, same column, nothing broken.
     do
         local book = self.plugin:currentBook(d)
-        local body = VerticalGroup:new { align = "left",
-            TextWidget:new { text = book.title, face = face(SIZE_ROW), max_width = card_inner_w } }
+        local cover_w, cover_h = Screen:scaleBySize(60), Screen:scaleBySize(82)
+        local ok_cov, cover_bb = pcall(function() return self.plugin:bookCover(book.title) end)
+        local lead, lead_w = icon("book.opened", ico), ico_col
+        if ok_cov and cover_bb and ImageWidget then
+            local ok_img, img = pcall(function()
+                return ImageWidget:new { image = cover_bb, image_disposable = false,
+                    width = cover_w, height = cover_h, scale_factor = 0 }
+            end)
+            if ok_img and img then
+                lead = FrameContainer:new { bordersize = bord, padding = 0, radius = 0, img }
+                lead_w = cover_w + 2 * bord + Screen:scaleBySize(14)
+            end
+        end
+        local bw = iw - lead_w - chev_col
+        local content = VerticalGroup:new { align = "left",
+            text(book.title, face(SIZE_ROW), { max_width = bw }) }
         if book.author ~= "" or book.percent ~= "" then
-            table.insert(body, TextWidget:new {
-                text = (book.author ~= "" and book.author or "") ..
-                    (book.percent ~= "" and ("   " .. book.percent) or ""),
-                face = face(SIZE_META), fgcolor = Blitbuffer.COLOR_GRAY_5, max_width = card_inner_w })
+            local meta = HorizontalGroup:new {}
+            if book.author ~= "" then
+                table.insert(meta, text(book.author, face(SIZE_META), { gray = true, max_width = math.floor(bw * 0.7) }))
+                table.insert(meta, HorizontalSpan:new { width = Screen:scaleBySize(14) })
+            end
+            if book.percent ~= "" then table.insert(meta, text(book.percent, face(SIZE_META))) end
+            table.insert(content, meta)
         end
-        if (book.fraction or 0) > 0 then
-            table.insert(body, VerticalSpan:new { width = Screen:scaleBySize(4) })
-            table.insert(body, ProgressWidget:new {
-                width = card_inner_w, height = Screen:scaleBySize(6), percentage = book.fraction,
-                margin_h = 0, margin_v = 0, bordersize = Screen:scaleBySize(1),
-            })
-        end
-        card("CO CZYTAM", nil, body, { kind = "continue", label = "continue" })
+        table.insert(content, VerticalSpan:new { width = Screen:scaleBySize(6) })
+        table.insert(content, ProgressWidget:new {
+            width = bw, height = Screen:scaleBySize(5), percentage = book.fraction or 0,
+            margin_h = 0, margin_v = 0, bordersize = bord, radius = Screen:scaleBySize(2),
+            fillcolor = Blitbuffer.COLOR_BLACK,
+        })
+        addContentCard(lead, lead_w, body("CO CZYTAM", nil, content), { kind = "continue", label = "continue" })
     end
 
     -- ZAKUPY
@@ -884,15 +1036,19 @@ function Dashboard:build()
         for _i, name in ipairs(shopping.preview or {}) do
             shop_items[#shop_items + 1] = { sym = "·", text = name }
         end
-        card("ZAKUPY", (shopping.total or 0) > 0 and tostring(shopping.total) or nil,
-            listBody(shop_items, "lista pusta"), { screen = "shopping", label = "shopping" })
+        addContentCard(icon("cart", ico), ico_col,
+            body("ZAKUPY", (shopping.total or 0) > 0 and tostring(shopping.total) or nil,
+                lines(shop_items, "lista pusta", text_w)),
+            { screen = "shopping", label = "shopping" })
     end
 
     -- CRAFTSSS
     do
         local crafts = d.crafts or {}
-        card("CRAFTSSS", #crafts > 0 and tostring(#crafts) or nil,
-            listBody(crafts, "nic w budowie"), { screen = "crafts", label = "crafts" })
+        addContentCard(icon("yarn", ico), ico_col,
+            body("CRAFTSSS", #crafts > 0 and tostring(#crafts) or nil,
+                lines(crafts, "nic w budowie", text_w)),
+            { screen = "crafts", label = "crafts" })
     end
 
     -- ---- footer: staleness / one rotating hint, inert, glance-only.
@@ -907,43 +1063,44 @@ function Dashboard:build()
         end
     end
     if foot ~= "" then
-        gap(10)
-        add(CenterContainer:new { dimen = { w = cw, h = h_meta },
-            TextWidget:new { text = foot, face = face(SIZE_META), fgcolor = Blitbuffer.COLOR_GRAY_5 } }, h_meta)
+        add(CenterContainer:new { dimen = Geom:new { w = cw, h = h_meta },
+            text(foot, face(SIZE_META), { gray = true }) }, h_meta)
     end
 
-    -- ---- bottom nav: pinned to the very bottom of the screen, not stacked
-    -- with the rest of the scrolling content. The spacer below is computed
-    -- from `y`, the REAL running offset every `add()`/`addSplit()` call above
-    -- already measured via getSize() — never an assumed content height.
-    local nav_h = math.max(MIN_TAP, Screen:scaleBySize(SIZE_LABEL * 2.6 * FONT_SCALE))
-    local nav_reserve = Screen:scaleBySize(2) + nav_h -- rule + the nav row itself
-    local spacer = H - pad - nav_reserve - y
+    -- ---- bottom nav: six equal icon+label targets pinned to the very bottom
+    -- of the screen, ZAMKNIJ first — the one way out of the whole screen, and
+    -- now a full-height tile rather than a small glyph in the corner. The
+    -- spacer below is computed from `y`, the REAL running offset every add()
+    -- above already measured via getSize() — never an assumed content height.
+    local nav_ico = Screen:scaleBySize(24)
+    local nav_h = math.max(MIN_TAP, nav_ico + Screen:scaleBySize(4) + h_label + Screen:scaleBySize(12))
+    local nav_rule = Screen:scaleBySize(2)
+    local spacer = H - pad - nav_rule - nav_h - y
     if spacer > 0 then
         rows[#rows + 1] = VerticalSpan:new { width = spacer }
         y = y + spacer
     end
 
-    add(rule(cw), Screen:scaleBySize(2))
+    add(rule(cw), nav_rule)
     local nav_items = {
-        { label = "ZADANIA", target = { screen = "tasks", label = "tasks" } },
-        { label = "DOM", target = { screen = "house", label = "house" } },
-        { label = "ZAKUPY", target = { screen = "shopping", label = "shopping" } },
-        { label = "RACHUNKI", target = { screen = "bills", label = "bills" } },
-        { label = "WIĘCEJ", target = { kind = "more", label = "more" } },
+        { icon = "close", label = "ZAMKNIJ", target = { kind = "close", label = "close" } },
+        { icon = "tasks", label = "ZADANIA", target = { screen = "tasks", label = "tasks" } },
+        { icon = "home", label = "DOM", target = { screen = "house", label = "house" } },
+        { icon = "cart", label = "ZAKUPY", target = { screen = "shopping", label = "shopping" } },
+        { icon = "wallet", label = "RACHUNKI", target = { screen = "bills", label = "bills" } },
+        { icon = "more", label = "WIĘCEJ", target = { kind = "more", label = "more" } },
     }
     local seg_w = math.floor(cw / #nav_items)
     local nav_group = HorizontalGroup:new {}
     for i, it in ipairs(nav_items) do
-        if i > 1 then
-            table.insert(nav_group, LineWidget:new {
-                dimen = Geom:new { w = Screen:scaleBySize(1), h = nav_h },
-                background = Blitbuffer.COLOR_GRAY_5,
-            })
-        end
+        if i > 1 then table.insert(nav_group, vline(nav_h)) end
         table.insert(nav_group, CenterContainer:new {
-            dimen = { w = seg_w - Screen:scaleBySize(1), h = nav_h },
-            TextWidget:new { text = it.label, face = face(SIZE_LABEL) },
+            dimen = Geom:new { w = seg_w - bord, h = nav_h },
+            VerticalGroup:new { align = "center",
+                icon(it.icon, nav_ico),
+                VerticalSpan:new { width = Screen:scaleBySize(4) },
+                text(it.label, face(SIZE_LABEL), { max_width = seg_w - 2 * bord }),
+            },
         })
     end
     local nav_ty = y
@@ -1061,6 +1218,76 @@ function ReadingOS:currentBook(d)
         return { title = "książka", author = "", fraction = 0, percent = "", open = true }
     end
     return info
+end
+
+
+--- Title as a comparison key: case-folded, punctuation and spacing dropped.
+local function titleKey(s)
+    return (tostring(s or ""):lower():gsub("[%s%p]", ""))
+end
+
+local function titleMatches(key, other)
+    local o = titleKey(other)
+    if key == "" or o == "" then return false end
+    if key == o then return true end
+    -- "Gadka" vs "Gadka. W sześćdziesiąt języków…": the board and the file's
+    -- metadata do not always agree on the subtitle. Eight characters so a
+    -- one-word title cannot claim every book that starts the same way.
+    local short = #key < #o and key or o
+    return #short >= 8 and (key:sub(1, #short) == o:sub(1, #short))
+end
+
+--- The hero book's cover, looked up on the device — never fetched.
+---
+--- The dashboard's book is the reading board's (see currentBook), which may
+--- not be the file open in KOReader, so the cover is found by title: the open
+--- document first, then the reading history, each looked up in the cover
+--- browser's own cache (settings/bookinfo_cache.sqlite3 — a read of what the
+--- file browser already extracted, no document is opened here). The open
+--- document's own cover is the one fallback, because KOReader has it decoded
+--- already. Nothing else: opening a second book just to read its cover is a
+--- second engine instance on a 256 MB device, and no cover is the correct
+--- answer far more often than a stall would be.
+---
+--- Cached per title so a refresh does not re-read the blob; the BlitBuffer
+--- stays owned here (image_disposable = false on the widget), so re-building
+--- the dashboard never paints from freed memory.
+--- @return BlitBuffer|nil
+function ReadingOS:bookCover(title)
+    local key = titleKey(title)
+    if key == "" then return nil end
+    if self.cover_cache and self.cover_cache.key == key then return self.cover_cache.bb end
+
+    local bb
+    pcall(function()
+        local doc = self.ui and self.ui.document
+        local files = {}
+        if doc and doc.file then files[#files + 1] = doc.file end
+        local ok_h, ReadHistory = pcall(require, "readhistory")
+        if ok_h and type(ReadHistory) == "table" and type(ReadHistory.hist) == "table" then
+            for i, it in ipairs(ReadHistory.hist) do
+                if i > 25 then break end
+                if type(it) == "table" and it.file then files[#files + 1] = it.file end
+            end
+        end
+        local ok_b, BookInfoManager = pcall(require, "bookinfomanager")
+        if not (ok_b and type(BookInfoManager) == "table") then BookInfoManager = nil end
+        for _i, file in ipairs(files) do
+            local info = BookInfoManager and BookInfoManager:getBookInfo(file, false)
+            local matched = type(info) == "table" and titleMatches(key, info.title)
+            if matched and info.has_cover then
+                local full = BookInfoManager:getBookInfo(file, true)
+                bb = type(full) == "table" and full.cover_bb or nil
+            end
+            if not bb and doc and doc.file == file and doc.getCoverPageImage then
+                local props = doc.getProps and doc:getProps() or {}
+                if matched or titleMatches(key, props.title) then bb = doc:getCoverPageImage() end
+            end
+            if bb then return end
+        end
+    end)
+    if bb then self.cover_cache = { key = key, bb = bb } end
+    return bb
 end
 
 --- Detail screens reuse KOReader's Menu: it already handles paging, tap
