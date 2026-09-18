@@ -679,32 +679,42 @@ function Dashboard:build()
     -- Version + update: what used to only live in the WIĘCEJ menu and the
     -- separate AKTUALIZACJA banner (kept below, unchanged, for the actual
     -- install action) — here it's just the glance answer to "am I current".
+    -- ASCII ">" rather than "→": that arrow glyph already exists elsewhere in
+    -- this file but was never physically confirmed on PW3 (TODO.md flags it
+    -- UNKNOWN) — this line renders far more often than either of its other
+    -- two spots, so it doesn't get to be the one that finds out.
     local ok_ver, local_version = pcall(function() return self.plugin:localVersion() end)
     local version_text = "v" .. (ok_ver and local_version or "?")
     if self.plugin.update_ready then
-        version_text = version_text .. " → v" .. tostring(self.plugin.update_ready)
+        version_text = version_text .. " > v" .. tostring(self.plugin.update_ready)
     end
 
     local ok_batt, capacity = pcall(function() return Device:getPowerDevice():getCapacity() end)
     local batt_text = (ok_batt and type(capacity) == "number") and (capacity .. "%") or "—"
-    local header_parts = { os.date("%H:%M"), plDate() }
-    if weather_text ~= "" then header_parts[#header_parts + 1] = weather_text end
-    header_parts[#header_parts + 1] = wifi_text
-    header_parts[#header_parts + 1] = version_text
-    header_parts[#header_parts + 1] = batt_text
 
     local close_glyph = TextWidget:new { text = "✕ ZAMKNIJ", face = face(SIZE_LABEL) }
     local ok_cs, close_size = pcall(function() return close_glyph:getSize() end)
     local close_w = (ok_cs and close_size and close_size.w) or Screen:scaleBySize(60)
     local close_gap = Screen:scaleBySize(14)
+
+    -- The line no longer shares one max_width across everything: a long SSID
+    -- (or "v2.2.3 > v2.2.4") must never be able to push the battery/version
+    -- off-screen. lrRow reserves the right side's own measured width first
+    -- and only lets the left side (clock/date/weather/Wi-Fi — the variable-
+    -- length part) truncate into whatever room is left, same guarantee the
+    -- close button already had via close_w.
+    local left_parts = { os.date("%H:%M"), plDate() }
+    if weather_text ~= "" then left_parts[#left_parts + 1] = weather_text end
+    left_parts[#left_parts + 1] = wifi_text
+    local left_text = table.concat(left_parts, "   ")
+    local right_text = version_text .. "   " .. batt_text
+
     add(LeftContainer:new { dimen = { w = cw, h = h_label },
         HorizontalGroup:new {
             close_glyph,
             HorizontalSpan:new { width = close_gap },
-            TextWidget:new {
-                text = table.concat(header_parts, "   "), face = face(SIZE_LABEL),
-                max_width = cw - close_w - close_gap,
-            },
+            lrRow(cw - close_w - close_gap, h_label, left_text, right_text,
+                face(SIZE_LABEL), face(SIZE_LABEL), false),
         } }, h_label, { kind = "close", label = "close", x2 = pad + close_w })
     add(rule(cw), Screen:scaleBySize(2))
     gap(8)
