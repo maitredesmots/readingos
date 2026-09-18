@@ -575,8 +575,11 @@ function Dashboard:claim(y, height, target)
     return y + height
 end
 
---- 3/5 wireframe grid: HEADER, ZADANIA (full width, top priority), DOM+CO
---- CZYTAM (half/half), ZAKUPY+CRAFTSSS (half/half), BOTTOM NAV (pinned).
+--- HEADER (Wi-Fi/version/battery, own bounded region — see lrRow split
+--- below), ZADANIA (full width, top priority, unboxed list), then DOM /
+--- CO CZYTAM / ZAKUPY / CRAFTSSS as individual full-width bordered cards,
+--- one under the other (2026-09-18 redesign — replaced the old DOM+CO CZYTAM
+--- / ZAKUPY+CRAFTSSS half/half column pairing), BOTTOM NAV (pinned).
 --- NAUKA/DIG/Help/Notatki/Artykuły moved off the main surface into WIĘCEJ —
 --- the screens themselves (openScreen "learn"/"dig"/"help") are untouched,
 --- only their entry point relocated. Rachunki/Notatki/Artykuły have no data
