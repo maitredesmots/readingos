@@ -417,6 +417,18 @@ function ReadingOS:fetch()
     return nil, nil, err
 end
 
+--- The server's change cursor (tasksss2's, proxied by hooome). A string
+--- that moves whenever a task/note/list changed anywhere — phone, browser,
+--- Telegram. nil when unreachable; callers treat that as "unknown", never
+--- as "changed".
+function ReadingOS:fetchRev()
+    local body = request("GET", baseUrl() .. "/api/readingos/rev")
+    local data = body and decode(body)
+    local rev = type(data) == "table" and data.rev
+    if type(rev) == "string" and rev ~= "" then return rev end
+    return nil
+end
+
 --- @return table|nil result, string|nil err — the reason matters: "has open
 --- steps" and "offline" need different words on screen, and collapsing both to
 --- nil is how the device ended up blaming the radio for a refused write.
@@ -654,6 +666,57 @@ function Dashboard:init()
         self.key_events = { Close = { { Device.input.group.Back } } }
     end
     self[1] = self:build()
+    self:scheduleRevPoll()
+end
+
+-- Live refresh: while the dashboard is on screen, ask the server once a
+-- minute whether anything changed (a ~40-byte cursor, not the dashboard)
+-- and rebuild only when it did — so a task ticked off on the phone or via
+-- Telegram shows up here within a minute, with no e-ink redraw otherwise.
+-- Skipped when the radio is down (request() blocks for its socket timeout
+-- and would freeze the UI), and when another ReadingOS screen sits on top
+-- (a rebuild under it would swap the hit map out from under the user).
+-- The first cursor the poll sees becomes the baseline, so the first poll
+-- can never fire a rebuild on unchanged data.
+local REV_POLL_SECONDS = 60
+
+function Dashboard:scheduleRevPoll()
+    if self.rev_poll then return end
+    self.rev_poll = function()
+        self.rev_poll_pending = false
+        if self.closed then return end
+        local ok, connected = pcall(function() return NetworkMgr:isConnected() end)
+        if ok and connected and UIManager:getTopmostVisibleWidget() == self then
+            local ok_rev, rev = pcall(function() return self.plugin:fetchRev() end)
+            rev = ok_rev and rev or nil
+            if rev and self.rev == nil then
+                self.rev = rev
+            elseif rev and rev ~= self.rev then
+                self.rev = rev
+                track("home", "live_refresh")
+                self.plugin:refreshInto(self)
+            end
+        end
+        if not self.closed then
+            self.rev_poll_pending = true
+            UIManager:scheduleIn(REV_POLL_SECONDS, self.rev_poll)
+        end
+    end
+    -- No baseline request at open: the first poll a minute later takes the
+    -- first cursor it sees as the baseline (see the nil-check above), so a
+    -- change lands one poll later than it could and opening the dashboard
+    -- stays a single round trip.
+    self.rev = nil
+    self.rev_poll_pending = true
+    UIManager:scheduleIn(REV_POLL_SECONDS, self.rev_poll)
+end
+
+function Dashboard:cancelRevPoll()
+    self.closed = true
+    if self.rev_poll and self.rev_poll_pending then
+        UIManager:unschedule(self.rev_poll)
+        self.rev_poll_pending = false
+    end
 end
 
 --- Register a tap target covering the next `height` pixels.
@@ -1208,6 +1271,7 @@ function Dashboard:onClose()
 end
 
 function Dashboard:onCloseWidget()
+    self:cancelRevPoll()
     UIManager:setDirty(nil, "full")
 end
 
@@ -1381,6 +1445,19 @@ function ReadingOS:refreshInto(dashboard)
     dashboard[1] = dashboard:build()
     UIManager:setDirty(dashboard, "full")
     return true
+end
+
+--- ODŚWIEŻ from the WIĘCEJ menu: a visible receipt either way, and the
+--- cursor is re-read so the poll does not immediately refresh again.
+function ReadingOS:refreshNow(dashboard)
+    track("home", "refresh")
+    if self:refreshInto(dashboard) then
+        local ok_rev, rev = pcall(function() return self:fetchRev() end)
+        if ok_rev and rev then dashboard.rev = rev end
+        self:receipt(_("Odświeżono."))
+    else
+        UIManager:show(InfoMessage:new { text = _("Brak połączenia — pokazuję ostatnie dane.") })
+    end
 end
 
 --- Rule 3: the receipt lands before the network is touched.
@@ -1900,26 +1977,88 @@ function ReadingOS:handle(dashboard, target, is_hold)
     if target.screen then return self:openScreen(dashboard, target.screen) end
 end
 
---- WIĘCEJ: everything the main surface no longer shows directly. All six
---- entries now have real screens (openScreen) — Craftsss/Nauka/Dig/Help
---- unchanged, Notatki/Artykuły new (local files, no server involved).
+--- WIĘCEJ: three groups, most-used first, one screen (ADHD rule: as few
+--- taps as possible between intent and action). Działania are things you
+--- do now; Ekrany are the surfaces that left the dashboard; Ustawienia
+--- opens KOReader's own ReadingOS submenu (the one under Narzędzia) rather
+--- than duplicating its toggles here — one definition, one place to fix.
+--- Group headers are `inert` rows (full black, not tappable, not dimmed).
 function ReadingOS:openMore(dashboard)
     local items = {
-        { text = "NOTATKI", screen = "notes" },
-        { text = "ARTYKUŁY", screen = "articles" },
+        { text = "— DZIAŁANIA —", inert = true },
+        { text = "ODŚWIEŻ", action = "refresh" },
+        { text = "TELEFON", action = "phone" },
+        { text = "ZABLOKUJ EKRAN", action = "lock" },
+        { text = "— EKRANY —", inert = true },
         { text = "CRAFTSSS", screen = "crafts" },
         { text = "NAUKA", screen = "learn" },
         { text = "DIG", screen = "dig" },
-        { text = "HELP", screen = "help" },
+        { text = "NOTATKI", screen = "notes" },
+        { text = "ARTYKUŁY", screen = "articles" },
+        { text = "— USTAWIENIA —", inert = true },
+        { text = "USTAWIENIA", action = "settings" },
+        { text = "SPRAWDŹ AKTUALIZACJE  (v" .. self:localVersion() .. ")", action = "update" },
+        { text = "JAK TO DZIAŁA", screen = "help" },
     }
     self:showList("WIĘCEJ", items, function(item, menu)
         UIManager:close(menu)
-        if item.soon then
-            UIManager:show(InfoMessage:new { text = _(item.soon) })
+        if item.action == "refresh" then
+            self:refreshNow(dashboard)
+        elseif item.action == "phone" then
+            self:showPhone()
+        elseif item.action == "lock" then
+            self:showLockScreen()
+        elseif item.action == "settings" then
+            self:openSettings()
+        elseif item.action == "update" then
+            self:checkForUpdate(false)
         elseif item.screen then
             self:openScreen(dashboard, item.screen)
         end
     end)
+end
+
+--- The KOReader ReadingOS submenu, opened as its own screen. Same
+--- `sub_item_table` addToMainMenu registers under Narzędzia — built once,
+--- shown here through KOReader's own TouchMenu so every toggle, spinner and
+--- text editor behaves exactly as it does there.
+function ReadingOS:openSettings()
+    local ok, err = pcall(function()
+        local TouchMenu = require("ui/widget/touchmenu")
+        local items = {}
+        self:addToMainMenu(items)
+        local entry = items.readingos
+        if not (entry and entry.sub_item_table) then error("no menu entry") end
+        -- TouchMenu's tab_item_table[n] IS that tab's item list, carrying
+        -- its own .text/.icon (readermenu.lua does the same with the
+        -- registered tables).
+        local tab = entry.sub_item_table
+        tab.text = entry.text
+        tab.icon = "appbar.settings"
+        local container = CenterContainer:new {
+            covers_header = true,
+            ignore = "height",
+            dimen = Screen:getSize(),
+        }
+        local menu = TouchMenu:new {
+            width = Screen:getWidth(),
+            tab_item_table = { tab },
+            show_parent = container,
+        }
+        menu.close_callback = function()
+            track("settings", "back")
+            UIManager:close(container)
+        end
+        container[1] = menu
+        track("settings", "open")
+        UIManager:show(container)
+    end)
+    if not ok then
+        logger.warn("ReadingOS: openSettings failed:", err)
+        UIManager:show(InfoMessage:new {
+            text = _("Ustawienia: Narzędzia → ReadingOS w menu KOReadera."),
+        })
+    end
 end
 
 function ReadingOS:openScreen(dashboard, screen)
