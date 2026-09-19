@@ -354,6 +354,94 @@ end
 -- the readingos skill reads later to say which sections earn their place and
 -- which are dead weight.
 
+-- ------------------------------------------------- craft cache + tick journal
+--
+-- Two small stores, both in the cache dir next to the dashboard's own, so a
+-- crochet session survives what a PW3 actually does: the radio drops on
+-- suspend, and Wi-Fi is off most of the time while you work.
+--
+--   * the pattern, one file per send id — reopening offline shows the rows
+--     instead of "nie udało się pobrać wzoru";
+--   * the ticks that could not reach the server, replayed on the next call.
+--
+-- The tick API is idempotent by construction (the server sets is_done to the
+-- value sent, never toggles — see the craft_row branch of /act), so replaying
+-- a tick can never double-apply it. That is why the journal stores the
+-- server's own row id and the wanted state and nothing else: no new
+-- identifier, no client-side clock, nothing to reconcile.
+local CRAFT_JOURNAL_FILE = DataStorage:getDataDir() .. "/cache/readingos-craft-ticks.json"
+local CRAFT_JOURNAL_MAX = 400 -- a session is tens of rows; this is the runaway guard
+
+local function craftCacheFile(send_id)
+    return DataStorage:getDataDir() .. "/cache/readingos-craft-" .. tostring(send_id) .. ".json"
+end
+
+--- A payload is only worth caching (or trusting on the way back) if it is the
+--- shape CraftView draws from. A half-written file must never replace a good
+--- pattern on screen.
+local function craftPayloadOk(p)
+    return type(p) == "table" and type(p.rows) == "table" and #p.rows > 0
+end
+
+local function craftCacheSave(send_id, payload)
+    if not craftPayloadOk(payload) then return end
+    util.makePath(DataStorage:getDataDir() .. "/cache/")
+    local encoded = encode({ timestamp = os.time(), data = payload })
+    if not encoded then return end
+    -- Write beside it and rename: a power cut mid-write leaves the previous
+    -- good pattern in place rather than a truncated one.
+    local tmp = craftCacheFile(send_id) .. ".new"
+    local f = io.open(tmp, "w")
+    if not f then return end
+    f:write(encoded)
+    f:close()
+    os.remove(craftCacheFile(send_id))
+    os.rename(tmp, craftCacheFile(send_id))
+end
+
+--- @return table|nil payload, number|nil age_seconds
+local function craftCacheLoad(send_id)
+    local f = io.open(craftCacheFile(send_id), "r")
+    if not f then return nil, nil end
+    local content = f:read("*all")
+    f:close()
+    local cached = decode(content)
+    if type(cached) ~= "table" or not craftPayloadOk(cached.data) then return nil, nil end
+    return cached.data, os.time() - (cached.timestamp or 0)
+end
+
+local function craftJournal()
+    local f = io.open(CRAFT_JOURNAL_FILE, "r")
+    if not f then return {} end
+    local content = f:read("*all")
+    f:close()
+    local j = decode(content)
+    if type(j) == "table" and type(j.ticks) == "table" then return j.ticks end
+    return {}
+end
+
+local function craftJournalSave(ticks)
+    util.makePath(DataStorage:getDataDir() .. "/cache/")
+    local f = io.open(CRAFT_JOURNAL_FILE, "w")
+    if not f then return end
+    f:write(encode({ ticks = ticks }) or '{"ticks":[]}')
+    f:close()
+end
+
+--- Record a tick the server did not take. One entry per row: ticking and
+--- un-ticking the same row offline leaves the last intention, which is also
+--- what the row shows on screen.
+local function craftJournalAdd(row_id, done)
+    if not row_id then return end
+    local ticks = craftJournal()
+    for _i, t in ipairs(ticks) do
+        if t.id == row_id then t.done = done and true or false; craftJournalSave(ticks); return end
+    end
+    if #ticks >= CRAFT_JOURNAL_MAX then table.remove(ticks, 1) end
+    ticks[#ticks + 1] = { id = row_id, done = done and true or false }
+    craftJournalSave(ticks)
+end
+
 local function telemetryQueue()
     local f = io.open(TELEMETRY_FILE, "r")
     if not f then return {} end
@@ -421,6 +509,27 @@ end
 --- that moves whenever a task/note/list changed anywhere — phone, browser,
 --- Telegram. nil when unreachable; callers treat that as "unknown", never
 --- as "changed".
+--- Replay ticks the network ate. Each is removed only once the server has
+--- taken it; the first failure stops the run and the rest stay for next time,
+--- so nothing is dropped on a flaky connection. Safe to call at any moment:
+--- replaying a tick the server already has is a no-op there.
+--- @return number flushed, number remaining
+function ReadingOS:flushCraftTicks()
+    local ticks = craftJournal()
+    if #ticks == 0 then return 0, 0 end
+    local flushed = 0
+    while ticks[1] do
+        local t = ticks[1]
+        local res = self:act("craft_row", t.id, { done = t.done })
+        if not (res and res.ok ~= false) then break end
+        table.remove(ticks, 1)
+        flushed = flushed + 1
+    end
+    craftJournalSave(ticks)
+    if flushed > 0 then track("craft", "ticks_flushed", tostring(flushed)) end
+    return flushed, #ticks
+end
+
 function ReadingOS:fetchRev()
     local body = request("GET", baseUrl() .. "/api/readingos/rev")
     local data = body and decode(body)
@@ -2501,6 +2610,8 @@ end
 
 local CraftView = InputContainer:extend {
     plugin = nil,
+    send_id = nil,   -- which send this is, so its cache can be refreshed on a tick
+    stale = nil,     -- hours old when the rows came from disk instead of the server
     pattern = nil,   -- { id, title, size, rows = { {id, key, n, label, section, text, count, kind, flags, done, repeat} } }
     cursor = 1,      -- 1-based index of the row being worked
     awake_until = nil,
@@ -2592,6 +2703,10 @@ function CraftView:build()
     -- header: what this is, and the count that answers "how much is left"
     local head = "‹  " .. self.pattern.title
     if self.pattern.size then head = head .. " · " .. tostring(self.pattern.size) end
+    -- Rows from disk, not from the server: say so once, in the header, where
+    -- the dashboard already says it. Nothing else changes — an offline
+    -- pattern is fully usable, and the ticks are journalled.
+    if self.stale then head = head .. " · offline" end
     add(lrRow(cw, h_meta, head,
         string.format("%d / %d", math.min(self.cursor, total), total),
         faceFull(SIZE_META), faceFull(SIZE_META), true), { kind = "back" })
@@ -2772,6 +2887,21 @@ function CraftView:redraw()
     UIManager:setDirty(self, "ui")
 end
 
+--- Send a tick, and never lose it. The screen has already moved on (the
+--- hands are busy; an e-ink round trip before the redraw would be felt), so
+--- this runs after the redraw and its only job is that the intention
+--- survives: the server takes it now, or the journal holds it until the next
+--- call succeeds. The local cache is updated either way, so reopening
+--- offline resumes where the work actually stopped rather than where the
+--- server last heard about.
+function CraftView:commit(row, done)
+    local res = self.plugin:act("craft_row", row.id, { done = done })
+    if not (res and res.ok ~= false) then
+        craftJournalAdd(row.id, done)
+    end
+    if self.send_id then craftCacheSave(self.send_id, self.pattern) end
+end
+
 function CraftView:onTap(_arg, ges)
     local t = self:targetAt(ges.pos.x, ges.pos.y)
     if not t then return true end
@@ -2794,7 +2924,7 @@ function CraftView:onTap(_arg, ges)
         row.done = true
         self.cursor = math.min(self.cursor + 1, #self.pattern.rows + 1)
         self:redraw() -- optimistic: the hands are busy, the network can catch up
-        self.plugin:act("craft_row", row.id, { done = true })
+        self:commit(row, true)
         return true
 
     elseif t.kind == "undo_row" then
@@ -2805,7 +2935,7 @@ function CraftView:onTap(_arg, ges)
         row.done = false
         self.cursor = i
         self:redraw()
-        self.plugin:act("craft_row", row.id, { done = false })
+        self:commit(row, false)
         return true
     end
     return true
@@ -2885,12 +3015,37 @@ function CraftView:onCloseWidget()
     UIManager:setDirty(nil, "full")
 end
 
+--- Open a sent pattern. Fresh from the server when it answers, otherwise the
+--- last copy of that same pattern from disk — the radio is off most of the
+--- time while you crochet, and a pattern you already received is not a good
+--- reason to refuse to show it. Any ticks the network ate earlier go out
+--- first, so the server's `done` flags (which decide where you resume) are
+--- current before they are read back.
 function ReadingOS:openPattern(id)
+    pcall(function() self:flushCraftTicks() end)
     local data = decode(request("GET", baseUrl() .. "/api/readingos/crafts/" .. tostring(id)))
-    if type(data) ~= "table" or type(data.rows) ~= "table" or #data.rows == 0 then
+    local from_cache, cache_age = false, nil
+    if not craftPayloadOk(data) then
+        data, cache_age = craftCacheLoad(id)
+        from_cache = data ~= nil
+    end
+    if not craftPayloadOk(data) then
         UIManager:show(InfoMessage:new { text = _("Nie udało się pobrać wzoru.") })
         return
     end
+    -- Anything the flush above could not deliver is still true here: the row
+    -- was crocheted, the server just has not heard yet. Lay those intentions
+    -- over whatever arrived, so a half-failed flush can never drag the
+    -- resume point back over work already done.
+    local pending = craftJournal()
+    if #pending > 0 then
+        local by_id = {}
+        for _i, t in ipairs(pending) do by_id[t.id] = t.done end
+        for _i, r in ipairs(data.rows) do
+            if by_id[r.id] ~= nil then r.done = by_id[r.id] end
+        end
+    end
+    if not from_cache then craftCacheSave(id, data) end
     -- Flatten the repeat marker: nested tables in a hot redraw path are a
     -- needless indirection on a 1 GHz CPU.
     for _i, r in ipairs(data.rows) do
@@ -2900,8 +3055,11 @@ function ReadingOS:openPattern(id)
         -- rows, and the label is then the only thing there is to show.
         if (r.text == nil or r.text == "") then r.text = r.label or "" end
     end
-    track("craft", "open", data.title)
-    UIManager:show(CraftView:new { plugin = self, pattern = data }, "full")
+    track("craft", "open", from_cache and "cached" or data.title)
+    UIManager:show(CraftView:new {
+        plugin = self, pattern = data, send_id = id,
+        stale = from_cache and math.floor((cache_age or 0) / 3600) or nil,
+    }, "full")
 end
 
 --- The manual. Generated server-side from the same constants the game runs on,
