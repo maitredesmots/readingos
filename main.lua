@@ -2883,6 +2883,18 @@ end
 
 function CraftView:redraw()
     self.hit = {}
+    -- Same rule as the dashboard's refreshInto: release the tree being
+    -- replaced before dropping it. This one redraws on every tick — 54 times
+    -- in a Jewelry Saver session — and each tree holds a TextBoxWidget, whose
+    -- free() releases C-allocated XText and blitbuffers and cancels any
+    -- scheduled image update. Reference nil'd first so nothing can be freed
+    -- twice, pcall'd so a stubborn widget costs a log line, not the redraw.
+    local stale_root = self[1]
+    self[1] = nil
+    if stale_root and stale_root.free then
+        local ok_free, err = pcall(function() stale_root:free() end)
+        if not ok_free then logger.warn("ReadingOS: craft view free failed:", err) end
+    end
     self[1] = self:build()
     UIManager:setDirty(self, "ui")
 end
