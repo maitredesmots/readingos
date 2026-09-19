@@ -678,6 +678,17 @@ end
 -- (a rebuild under it would swap the hit map out from under the user).
 -- The first cursor the poll sees becomes the baseline, so the first poll
 -- can never fire a rebuild on unchanged data.
+-- Asleep, the poll stays quiet. UIManager schedules on CLOCK_MONOTONIC,
+-- which does not tick in suspend, so every wake finds this task overdue and
+-- runs it immediately — including the 15-minute RTC bounce that redraws the
+-- sleep screen (rtcRefreshCallback → toggleSuspend → onResume, which clears
+-- `simulated_wakeup` and goes straight back down). Fetching there would cost
+-- a radio round trip and a full e-ink redraw on a device about to sleep
+-- again, every quarter of an hour, for as long as the dashboard was left
+-- open. `Device.screen_saver_mode` (set by patchScreensaver) and the
+-- plugin's own `simulated_wakeup` are the two states that say so; a skipped
+-- tick consumes nothing and re-arms as usual, so the change is picked up on
+-- the first genuinely awake poll.
 local REV_POLL_SECONDS = 60
 
 function Dashboard:scheduleRevPoll()
@@ -685,8 +696,9 @@ function Dashboard:scheduleRevPoll()
     self.rev_poll = function()
         self.rev_poll_pending = false
         if self.closed then return end
+        local asleep = Device.screen_saver_mode or self.plugin.simulated_wakeup
         local ok, connected = pcall(function() return NetworkMgr:isConnected() end)
-        if ok and connected and UIManager:getTopmostVisibleWidget() == self then
+        if not asleep and ok and connected and UIManager:getTopmostVisibleWidget() == self then
             local ok_rev, rev = pcall(function() return self.plugin:fetchRev() end)
             rev = ok_rev and rev or nil
             if rev and self.rev == nil then
@@ -1442,6 +1454,20 @@ function ReadingOS:refreshInto(dashboard)
     dashboard.data = data
     dashboard.age = age
     dashboard.hit = {}
+    -- Release the tree being replaced before dropping the reference: a
+    -- rebuild is routine now (the live-refresh poll), and each one allocates
+    -- a fresh scaled cover BlitBuffer. free() is KOReader's own recursive
+    -- release (WidgetContainer:free walks its children); pcall'd because a
+    -- widget that refuses to free must not cost us the refresh, and the old
+    -- root is dropped either way. The new tree is built after this line, so
+    -- it can never be the one freed, and `dashboard[1]` is nil'd so a second
+    -- refresh cannot free the same tree twice.
+    local stale_root = dashboard[1]
+    dashboard[1] = nil
+    if stale_root and stale_root.free then
+        local ok_free, err = pcall(function() stale_root:free() end)
+        if not ok_free then logger.warn("ReadingOS: dashboard free failed:", err) end
+    end
     dashboard[1] = dashboard:build()
     UIManager:setDirty(dashboard, "full")
     return true
