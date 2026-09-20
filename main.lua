@@ -72,6 +72,7 @@ local DEFAULTS = {
     readingos_lock_minutes = 30,     -- on-demand lock screen auto-unlocks after
     readingos_ss_landscape = true,   -- three categories side by side need the width
     readingos_device_id = "",        -- generated once on first "Telefon" open, never regenerated
+    readingos_craft_font = 0,        -- CraftView instruction size, -2..+2 steps around the default
 }
 
 local CACHE_FILE = DataStorage:getDataDir() .. "/cache/readingos.json"
@@ -2608,6 +2609,64 @@ end
 -- so the eye finds it without reading, and the screen kept awake because
 -- stopping mid-round to wake a Kindle is how you lose your place.
 
+--- A QR code on a white sheet, big enough for a phone camera to read off
+--- e-ink from a hand's length away. Any tap closes it. The code itself is
+--- KOReader's own QRWidget (libqrencode over a blitbuffer, the same widget
+--- the Phone Companion pairing uses); the frame around it is the quiet zone.
+local CraftQR = InputContainer:extend {
+    title = nil,
+    url = nil,
+}
+
+function CraftQR:init()
+    local W, H = Screen:getWidth(), Screen:getHeight()
+    self.dimen = Geom:new { x = 0, y = 0, w = W, h = H }
+    self.covers_fullscreen = true
+    if Device:isTouchDevice() then
+        self.ges_events = { TapClose = { GestureRange:new { ges = "tap", range = self.dimen } } }
+    end
+    local QRWidget = require("ui/widget/qrwidget")
+    -- Quiet zone: the spec wants four modules of white around the code; a
+    -- 33-module code at this size has ~20 px modules, so this is generous
+    -- on purpose rather than computed — white is free on this panel.
+    local quiet = Screen:scaleBySize(48)
+    local side = math.min(W - 2 * quiet, Screen:scaleBySize(400))
+    self[1] = FrameContainer:new {
+        background = Blitbuffer.COLOR_WHITE, bordersize = 0, padding = 0, width = W, height = H,
+        CenterContainer:new { dimen = Geom:new { w = W, h = H },
+            VerticalGroup:new { align = "center",
+                TextWidget:new { text = self.title or "", face = faceFull(SIZE_ROW), max_width = W - 2 * quiet },
+                VerticalSpan:new { width = quiet },
+                -- scale_factor = 1, as QRMessage does: the modules are drawn
+                -- at an integer size and centred in the box, never resampled
+                -- to fit it — a smoothed QR is grey at the edges on e-ink.
+                FrameContainer:new { background = Blitbuffer.COLOR_WHITE, bordersize = 0, padding = quiet,
+                    QRWidget:new { text = self.url, width = side, height = side, scale_factor = 1 } },
+                VerticalSpan:new { width = quiet },
+                TextWidget:new { text = _("COFNIJ · dotknij, by wrócić do wzoru"), face = faceFull(SIZE_META),
+                    fgcolor = Blitbuffer.COLOR_GRAY_5, max_width = W - 2 * quiet },
+            } },
+    }
+end
+
+function CraftQR:onTapClose()
+    UIManager:close(self)
+    return true
+end
+CraftQR.onClose = CraftQR.onTapClose
+
+function CraftQR:onCloseWidget()
+    -- The QR's blitbuffer is C memory: release it here, not when the GC gets
+    -- round to it. ImageWidget:free is idempotent, so the CloseWidget event
+    -- reaching the QRWidget as well costs nothing.
+    if self[1] and self[1].free then
+        local ok, err = pcall(function() self[1]:free() end)
+        if not ok then logger.warn("ReadingOS: craft QR free failed:", err) end
+    end
+    -- A sheet of black modules leaves ghosts; the pattern gets a full refresh.
+    UIManager:setDirty(nil, "full")
+end
+
 local CraftView = InputContainer:extend {
     plugin = nil,
     send_id = nil,   -- which send this is, so its cache can be refreshed on a tick
@@ -2618,6 +2677,29 @@ local CraftView = InputContainer:extend {
     awake_task = nil,
     opened_at = nil,
 }
+
+-- The instruction's size is the one thing on this screen a reader adjusts:
+-- five steps, three points apart, around the size the screen was tuned at.
+-- Stored in G_reader_settings like every other ReadingOS setting (never on
+-- the server — it is a property of these eyes and this panel), and read on
+-- every build so a level survives ticks, redraws and reopening the pattern.
+local CRAFT_FONT_MIN, CRAFT_FONT_MAX, CRAFT_FONT_STEP = -2, 2, 3
+
+local function craftFontLevel()
+    local n = tonumber(get("readingos_craft_font")) or 0
+    return math.max(CRAFT_FONT_MIN, math.min(CRAFT_FONT_MAX, math.floor(n)))
+end
+
+--- Step the instruction size and redraw in place. The cursor, the done flags
+--- and the pattern itself are not touched: this is a change of glasses, not
+--- of place.
+function CraftView:setFontLevel(level)
+    level = math.max(CRAFT_FONT_MIN, math.min(CRAFT_FONT_MAX, level))
+    if level == craftFontLevel() then return end
+    set("readingos_craft_font", level)
+    track("craft", "font", tostring(level))
+    self:redraw()
+end
 
 function CraftView:init()
     self.opened_at = os.time()
@@ -2782,22 +2864,37 @@ function CraftView:build()
         + Screen:scaleBySize(2) + h_meta + pad
     local avail = H - y - reserved
 
-    local box = currentBox(faceFull(SIZE_TITLE))
-    local n_behind = math.min(2, self.cursor - 1)
-    local n_ahead = math.min(3, total - self.cursor)
+    local level = craftFontLevel()
+    local function sizeAt(l) return SIZE_TITLE + CRAFT_FONT_STEP * l end
+    local box = currentBox(faceFull(sizeAt(level)))
+    local n_behind, n_ahead
     local function fits()
         return box:getSize().h + (n_behind + n_ahead) * h_row + Screen:scaleBySize(18) <= avail
     end
-    while not fits() and (n_behind + n_ahead) > 0 do
-        -- Ahead goes first; the row just finished stays longest, because "did
-        -- my tap register?" is answered by seeing it marked OK.
-        if n_ahead >= n_behind and n_ahead > 0 then n_ahead = n_ahead - 1 else n_behind = n_behind - 1 end
+    local function trim()
+        n_behind = math.min(2, self.cursor - 1)
+        n_ahead = math.min(3, total - self.cursor)
+        while not fits() and (n_behind + n_ahead) > 0 do
+            -- Ahead goes first; the row just finished stays longest, because
+            -- "did my tap register?" is answered by seeing it marked OK.
+            if n_ahead >= n_behind and n_ahead > 0 then n_ahead = n_ahead - 1 else n_behind = n_behind - 1 end
+        end
     end
-    if not fits() then box = currentBox(faceFull(SIZE_ROW)) end
+    trim()
+    -- A row too long for the chosen size steps down one level at a time —
+    -- the biggest size that still shows the whole instruction, with as much
+    -- context as that size leaves room for. The 176-character round of the
+    -- Jewelry Saver needs this at +2 on the PW3; every shorter row gets the
+    -- full size. Never smaller than the smallest level a reader can choose.
+    while not fits() and level > CRAFT_FONT_MIN do
+        level = level - 1
+        box = currentBox(faceFull(sizeAt(level)))
+        trim()
+    end
     if not fits() then
         -- A single row longer than the screen. Clip with an ellipsis rather
         -- than push ZROBIONE off the panel — and flag it for craftsss (P2).
-        box = currentBox(faceFull(SIZE_ROW), math.max(h_row, avail - 4 * h_meta - Screen:scaleBySize(60)))
+        box = currentBox(faceFull(sizeAt(level)), math.max(h_row, avail - 4 * h_meta - Screen:scaleBySize(60)))
     end
 
     -- behind: enough to know where you are, greyed, tappable to jump back
@@ -2830,13 +2927,26 @@ function CraftView:build()
         y = y + slack
     end
     gap(10)
-    local bw = math.floor((cw - Screen:scaleBySize(10)) / 2)
+    -- ZROBIONE | QR | COFNIJ. The QR square is exactly one button tall and
+    -- sits dead centre; the two big buttons split what is left, so ZROBIONE
+    -- keeps its place under the thumb.
+    local bgap = Screen:scaleBySize(10)
+    local qw = h_buttons
+    local bw = math.floor((cw - qw - 2 * bgap) / 2)
     local buttons = OverlapGroup:new { dimen = { w = cw, h = h_buttons } }
     table.insert(buttons, LeftContainer:new { dimen = { w = cw, h = h_buttons },
         FrameContainer:new { bordersize = Screen:scaleBySize(1), padding = Screen:scaleBySize(10),
             width = bw, radius = 0, background = Blitbuffer.COLOR_BLACK,
             CenterContainer:new { dimen = { w = bw - Screen:scaleBySize(22), h = h_row },
                 TextWidget:new { text = "ZROBIONE", face = faceFull(SIZE_ROW), fgcolor = Blitbuffer.COLOR_WHITE } } } })
+    -- QR dims when the server sent no page URL for this pattern (an old
+    -- cached copy, or a pattern deleted in Craftsss); it stays put, like COFNIJ.
+    table.insert(buttons, CenterContainer:new { dimen = { w = cw, h = h_buttons },
+        FrameContainer:new { bordersize = Screen:scaleBySize(1), padding = Screen:scaleBySize(10),
+            width = qw, radius = 0,
+            CenterContainer:new { dimen = { w = qw - Screen:scaleBySize(22), h = h_row },
+                TextWidget:new { text = "QR", face = faceFull(SIZE_ROW),
+                    fgcolor = self.pattern.url and nil or Blitbuffer.COLOR_GRAY_5 } } } })
     -- COFNIJ dims when there is nothing to undo; it never disappears, so the
     -- layout holds still and the thumb keeps its map of the screen.
     table.insert(buttons, RightContainer:new { dimen = { w = cw, h = h_buttons },
@@ -2845,11 +2955,14 @@ function CraftView:build()
             CenterContainer:new { dimen = { w = bw - Screen:scaleBySize(22), h = h_row },
                 TextWidget:new { text = "COFNIJ", face = faceFull(SIZE_ROW),
                     fgcolor = self.cursor > 1 and nil or Blitbuffer.COLOR_GRAY_5 } } } })
-    -- One tap target per half, split down the middle.
+    -- Three tap targets side by side; the gaps go to the QR, which is the
+    -- smallest thing to aim at.
     local by = y
     add(buttons)
-    self.hit[#self.hit + 1] = { y1 = by, y2 = y, x2 = pad + bw, kind = "done" }
-    self.hit[#self.hit + 1] = { y1 = by, y2 = y, x1 = pad + bw, kind = "undo_row" }
+    local qx1, qx2 = pad + bw, pad + bw + 2 * bgap + qw
+    self.hit[#self.hit + 1] = { y1 = by, y2 = y, x2 = qx1, kind = "done" }
+    self.hit[#self.hit + 1] = { y1 = by, y2 = y, x1 = qx1, x2 = qx2, kind = "qr" }
+    self.hit[#self.hit + 1] = { y1 = by, y2 = y, x1 = qx2, kind = "undo_row" }
 
     -- how long the screen will stay awake, so it is never a mystery
     gap(8)
@@ -2924,6 +3037,9 @@ function CraftView:onTap(_arg, ges)
     elseif t.kind == "awake" then
         return self:askAwake()
 
+    elseif t.kind == "qr" then
+        return self:showQR()
+
     elseif t.kind == "goto" then
         self.cursor = t.index
         self:redraw()
@@ -2958,8 +3074,10 @@ function CraftView:onSwipeBack(_arg, ges)
     return true
 end
 
---- Keep the screen on for a bounded time. Bounded because a pattern left open
---- overnight would otherwise drain the battery to nothing by morning.
+--- The pattern's settings, behind the one line at the bottom that was already
+--- tappable: the instruction size, and how long to keep the screen on. Bounded
+--- because a pattern left open overnight would otherwise drain the battery to
+--- nothing by morning. One dialog, so a second tap target never had to exist.
 function CraftView:askAwake()
     local ButtonDialogTitle = require("ui/widget/buttondialogtitle")
     local dialog
@@ -2969,15 +3087,44 @@ function CraftView:askAwake()
             self:setAwake(minutes)
         end
     end
+    local level = craftFontLevel()
+    local function font(delta)
+        return function()
+            UIManager:close(dialog)
+            self:setFontLevel(level + delta)
+        end
+    end
     dialog = ButtonDialogTitle:new {
-        title = _("Nie gaś ekranu przez:"),
+        title = string.format(_("Czcionka instrukcji: %s\nNie gaś ekranu przez:"),
+            level > 0 and ("+" .. level) or (level < 0 and ("−" .. -level) or "0")),
         title_align = "center",
         buttons = {
+            { { text = "A−  ZMNIEJSZ", callback = font(-1), enabled = level > CRAFT_FONT_MIN },
+              { text = "A+  ZWIĘKSZ", callback = font(1), enabled = level < CRAFT_FONT_MAX } },
             { { text = "30 min", callback = pick(30) }, { text = "1 h", callback = pick(60) } },
             { { text = "2 h", callback = pick(120) }, { text = _("wyłącz"), callback = pick(0) } },
         },
     }
     UIManager:show(dialog)
+    return true
+end
+
+--- The pattern's page in Craftsss, as a QR for the phone. It encodes
+--- `pattern.url` exactly as the server sent it: the plugin knows no hostname
+--- of its own, and the address it talks to is a LAN IP the phone may not be
+--- on. Shown on top of this view, which is left exactly as it is — nothing
+--- fetched, nothing redrawn underneath, the cursor where it was when the
+--- sheet closes.
+function CraftView:showQR()
+    local url = self.pattern.url
+    if type(url) ~= "string" or url == "" then
+        UIManager:show(InfoMessage:new {
+            text = _("Brak linku do tego wzoru — wyślij go ponownie z Craftsss."),
+        })
+        return true
+    end
+    track("craft", "qr_open", self.pattern.title)
+    UIManager:show(CraftQR:new { title = self.pattern.title, url = url }, "full")
     return true
 end
 
@@ -4492,5 +4639,6 @@ end
 -- bottom of a screen that cannot scroll, so it gets a check.
 ReadingOS._Dashboard = Dashboard
 ReadingOS._CraftView = CraftView
+ReadingOS._CraftQR = CraftQR
 
 return ReadingOS
