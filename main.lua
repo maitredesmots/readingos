@@ -3468,7 +3468,7 @@ local SS_CACHE_FILE = DataStorage:getDataDir() .. "/cache/readingos-screensaver.
 -- panel being read from across the room — the meta column was the part that
 -- could not be read at all. 9 costs a couple of rows on a busy day, and the
 -- "drop a whole category, count it in the footer" rule already handles that.
-local SS_FONT = 9
+local SS_FONT = 6
 
 local function ssFace(mult)
     return Font:getFace("cfont", Screen:scaleBySize(math.max(1, math.floor(SS_FONT * (mult or 1)))))
