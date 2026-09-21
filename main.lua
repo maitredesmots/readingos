@@ -690,6 +690,26 @@ local ICON_SVG = {
     wallet = [[<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48"><g fill="none" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="12" width="38" height="26" rx="3"/><path d="M5 19h38"/><rect x="29" y="24" width="14" height="8" rx="2"/></g><circle cx="35" cy="28" r="1.8" fill="#000000"/></svg>]],
     tasks = [[<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48"><g fill="none" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12h25M19 24h25M19 36h25"/><path d="M5 12l3 3 6-6M5 24l3 3 6-6M5 36l3 3 6-6"/></g></svg>]],
     more = [[<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48"><g fill="#000000"><circle cx="11" cy="24" r="4"/><circle cx="24" cy="24" r="4"/><circle cx="37" cy="24" r="4"/></g></svg>]],
+    -- Sleep screen v2.0: category, section, data-type and weather shapes.
+    ["fork"] = [[<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48"><g fill="none" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14q0 5 5 5v19M17 5v12M22 5v14q0 5-5 5"/><path d="M34 43V5q-7 4-7 16v6h7"/></g></svg>]],
+    ["broom"] = [[<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48"><g fill="none" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M38 5L24 24"/><path d="M24 24l-8-5-9 13 4 3-3 7 7-4 3 4 13-9z"/><path d="M13 31l7 5M17 27l7 5"/></g></svg>]],
+    ["paw"] = [[<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48"><g fill="none" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="24" cy="33" rx="9" ry="7"/><circle cx="12" cy="21" r="4"/><circle cx="19" cy="12" r="4"/><circle cx="29" cy="12" r="4"/><circle cx="36" cy="21" r="4"/></g></svg>]],
+    ["calendar"] = [[<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48"><g fill="none" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="9" width="36" height="33" rx="3"/><path d="M6 18h36M15 5v8M33 5v8"/><path d="M14 26h4M22 26h4M30 26h4M14 34h4M22 34h4"/></g></svg>]],
+    ["clock"] = [[<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48"><g fill="none" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><circle cx="24" cy="24" r="18"/><path d="M24 13v11l7 5"/></g></svg>]],
+    ["plane"] = [[<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48"><g fill="none" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M44 8L4 22l14 5 5 14 6-10 9 6z"/><path d="M18 27l26-19"/></g></svg>]],
+    ["satellite"] = [[<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48"><g fill="none" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><rect x="19" y="19" width="10" height="10" transform="rotate(45 24 24)"/><path d="M17 17l-5-5M31 31l5 5"/><rect x="3" y="7" width="12" height="7" transform="rotate(45 9 10.5)"/><rect x="33" y="34" width="12" height="7" transform="rotate(45 39 37.5)"/></g></svg>]],
+    ["refresh"] = [[<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48"><g fill="none" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M40 16A17 17 0 0 0 9 18"/><path d="M40 6v10H30"/><path d="M8 32a17 17 0 0 0 31-2"/><path d="M8 42V32h10"/></g></svg>]],
+    ["warn"] = [[<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48"><g fill="none" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M24 5L3 42h42z"/><path d="M24 18v12"/><circle cx="24" cy="36" r="0.5"/></g></svg>]],
+    ["sun"] = [[<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48"><g fill="none" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><circle cx="24" cy="24" r="8"/><path d="M24 4v6M24 38v6M4 24h6M38 24h6M10 10l4 4M34 34l4 4M10 38l4-4M34 14l4-4"/></g></svg>]],
+    ["sun-cloud"] = [[<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48"><g fill="none" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><circle cx="17" cy="16" r="6"/><path d="M17 4v3M5 16h3M8 7l2 2M26 7l-2 2"/><path d="M15 40h22a8 8 0 0 0 0-16 11 11 0 0 0-21 3 7 7 0 0 0-1 13z"/></g></svg>]],
+    ["cloud"] = [[<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48"><g fill="none" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M13 38h24a9 9 0 0 0 0-18 12 12 0 0 0-23 3 8 8 0 0 0-1 15z"/></g></svg>]],
+    ["fog"] = [[<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48"><g fill="none" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M13 28h24a8 8 0 0 0 0-16 11 11 0 0 0-21 3 7 7 0 0 0-3 13z"/><path d="M8 35h32M12 42h24"/></g></svg>]],
+    ["rain"] = [[<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48"><g fill="none" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M13 30h24a8 8 0 0 0 0-16 11 11 0 0 0-21 3 7 7 0 0 0-3 13z"/><path d="M16 36l-2 6M24 36l-2 6M32 36l-2 6"/></g></svg>]],
+    ["snow"] = [[<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48"><g fill="none" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M13 30h24a8 8 0 0 0 0-16 11 11 0 0 0-21 3 7 7 0 0 0-3 13z"/><path d="M16 37v6M13 40h6M30 37v6M27 40h6"/></g></svg>]],
+    ["storm"] = [[<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48"><g fill="none" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M13 30h24a8 8 0 0 0 0-16 11 11 0 0 0-21 3 7 7 0 0 0-3 13z"/><path d="M25 32l-5 7h7l-4 7"/></g></svg>]],
+    ["umbrella"] = [[<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48"><g fill="none" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M4 24a20 20 0 0 1 40 0z"/><path d="M24 24v14a4 4 0 0 1-8 0"/><path d="M24 4v2"/></g></svg>]],
+    ["drop"] = [[<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48"><g fill="none" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M24 5C17 16 12 23 12 30a12 12 0 0 0 24 0c0-7-5-14-12-25z"/></g></svg>]],
+    ["wind"] = [[<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48"><g fill="none" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M4 18h26a6 6 0 1 0-6-6"/><path d="M4 26h34a6 6 0 1 1-6 6"/><path d="M4 34h16"/></g></svg>]],
 }
 local ICON_DIR = DataStorage:getDataDir() .. "/cache/readingos-icons"
 
@@ -3510,67 +3530,139 @@ function ReadingOS:ssFetch()
     if os.time() - (cached.timestamp or 0) > (tonumber(get("readingos_cache_max_age")) or 0) then
         return nil, false
     end
+    -- When the cached copy was fetched, for the status line's "dane HH:MM".
+    cached.data._cached_at = cached.timestamp
     return cached.data, true
 end
 
---- Rows for the lab band, built first so the task list knows what space is left.
-local function ssLabRows(cw, lab)
-    local out = {}
-    if type(lab) ~= "table" then return out end
+--- Left and right widgets on one line, sized to what they actually render as.
+--- ssLine's twin for rows that carry an icon or a stacked cell.
+--- @return table widget, number height
+local function ssPair(width, left_w, right_w)
+    local h = left_w:getSize().h
+    if right_w then h = math.max(h, right_w:getSize().h) end
+    local group = OverlapGroup:new { dimen = { w = width, h = h } }
+    table.insert(group, LeftContainer:new { dimen = { w = width, h = h }, left_w })
+    if right_w then
+        table.insert(group, RightContainer:new { dimen = { w = width, h = h }, right_w })
+    end
+    return group, h
+end
+
+--- Icon in front of a widget, sized to the widget's measured height, so an
+--- icon can never make a row taller than its own text.
+local function ssIconed(name, widget)
+    return HorizontalGroup:new {
+        align = "center",
+        icon(name, widget:getSize().h),
+        HorizontalSpan:new { width = Screen:scaleBySize(6) },
+        widget,
+    }
+end
+
+--- The v2.0 bottom band: KALENDARZ | NAD DOMEM | ISS, header + at most two
+--- rows each (the server already cut them to two). Built and measured before
+--- the task columns, so its height is reserved and the columns can never push
+--- it off the screen. Planes and ISS still obey the "Pasek LAB" setting; the
+--- calendar panel does not, it is task-adjacent information.
+--- @return table|nil widget, number height
+local function ssBand(cw, d, with_lab)
+    local cal = type(d) == "table" and type(d.calendar) == "table" and d.calendar or nil
+    local lab = with_lab and type(d) == "table" and type(d.lab) == "table" and d.lab or nil
+    if not cal and not lab then return nil, 0 end
+
     local f_cat, f_row, f_meta = ssFace(1), ssFace(1), ssFace(0.85)
-    local planes = type(lab.planes) == "table" and lab.planes or {}
-    local iss = type(lab.iss) == "table" and lab.iss or {}
-    if #planes == 0 and #iss == 0 then return out end
+    local col_gap, sep_w = Screen:scaleBySize(14), Screen:scaleBySize(1)
+    local pw = math.floor((cw - 2 * (2 * col_gap + sep_w)) / 3)
+    local icon_w = Screen:scaleBySize(26) -- room an ssIconed prefix takes, for max_width
+    local panels = {}
 
-    out[#out + 1] = { rule(cw), Screen:scaleBySize(2) }
-    out[#out + 1] = { VerticalSpan:new { width = Screen:scaleBySize(5) }, Screen:scaleBySize(5) }
-    local w, h = ssLine(cw, "LAB",
-        (tonumber(lab.overhead) or #planes) .. " \u{2708}  60 NM", f_cat, f_meta, true)
-    out[#out + 1] = { w, h }
-
-    for _, p in ipairs(planes) do
-        local left = string.format("  %s  %s", tostring(p.flight or "?"), tostring(p.route or ""))
-        local right = string.format("%s  %s", tostring(p.dist or ""), tostring(p.alt or ""))
-        local pw, ph = ssLine(cw, left, right, f_row, f_meta, true)
-        out[#out + 1] = { pw, ph }
+    local function panel(name, title)
+        local p = { rows = {}, h = 0 }
+        function p.put(w, h)
+            p.rows[#p.rows + 1] = w
+            p.h = p.h + h
+        end
+        p.put(ssPair(pw, ssIconed(name, ssText(title, f_cat, false, pw - icon_w))))
+        p.put(VerticalSpan:new { width = Screen:scaleBySize(4) }, Screen:scaleBySize(4))
+        panels[#panels + 1] = p
+        return p
+    end
+    local function note(p, text)
+        p.put(ssLine(pw, text, "", f_meta, nil, false))
     end
 
-    for _, s in ipairs(iss) do
-        local left = string.format("  ISS  %s %s", tostring(s.day or ""), tostring(s.time or ""))
-        local right = string.format("%s  %s  %s%s", tostring(s.dur or ""), tostring(s.el or ""),
-            tostring(s.az or ""), (s.mag and s.mag ~= "") and ("  " .. s.mag) or "")
-        local iw, ih = ssLine(cw, left, right, f_row, f_meta, true)
-        out[#out + 1] = { iw, ih }
+    if cal then
+        local list = type(cal.rows) == "table" and cal.rows or {}
+        local p = panel("calendar", string.format("KALENDARZ  (%d)", tonumber(cal.total) or #list))
+        if #list == 0 then note(p, "brak wydarzeń") end
+        for _, r in ipairs(list) do
+            local meta = ssText(tostring(r.meta or ""), f_meta, false)
+            local room = pw - meta:getSize().w - icon_w - Screen:scaleBySize(8)
+            local timed = r.time and r.time ~= ""
+            -- All-day rows carry no clock: nothing about them happens at a time.
+            local body = ssText((timed and (r.time .. "  ") or "") .. tostring(r.text or "?"), f_row, false, room)
+            p.put(ssPair(pw, ssIconed(timed and "clock" or "calendar", body), meta))
+        end
     end
-    return out
+
+    if lab then
+        local planes = type(lab.planes) == "table" and lab.planes or {}
+        local p = panel("plane", string.format("NAD DOMEM  (%d)", tonumber(lab.overhead) or #planes))
+        if #planes == 0 then note(p, "pusto") end
+        for _, pl in ipairs(planes) do
+            local route = (pl.route and pl.route ~= "") and ("  " .. pl.route) or ""
+            p.put(ssPair(pw, ssIconed("plane",
+                ssText(tostring(pl.flight or "?") .. route, f_row, false, pw - icon_w))))
+            local detail = tostring(pl.dist or "")
+            if pl.alt and pl.alt ~= "" then detail = detail .. "  |  " .. pl.alt end
+            local indent = HorizontalGroup:new {
+                HorizontalSpan:new { width = icon_w },
+                ssText(detail, f_meta, true, pw - icon_w),
+            }
+            p.put(ssPair(pw, indent))
+        end
+
+        local iss = type(lab.iss) == "table" and lab.iss or {}
+        local more = tonumber(lab.iss_more_today) or 0
+        -- Passes printed in this panel; later ones are their own line below.
+        local q = panel("satellite", string.format("ISS  (%d)", #iss))
+        if #iss == 0 then note(q, "brak przelotów") end
+        for _, s in ipairs(iss) do
+            local when = (s.day and s.day ~= "dziś") and (s.day .. " ") or ""
+            local el = ssText(tostring(s.el or ""), f_meta, false)
+            local body = ssText(when .. tostring(s.time or "") .. "  " .. tostring(s.eta or ""), f_row, false,
+                pw - el:getSize().w - icon_w - Screen:scaleBySize(8))
+            q.put(ssPair(pw, ssIconed("satellite", body), el))
+        end
+        -- Only when the feed really has more passes later today.
+        if more > 0 then note(q, string.format("kolejne dziś: %d", more)) end
+    end
+
+    local tallest = 0
+    for _, p in ipairs(panels) do tallest = math.max(tallest, p.h) end
+    local row = HorizontalGroup:new { align = "top" }
+    for i, p in ipairs(panels) do
+        if i > 1 then
+            table.insert(row, HorizontalSpan:new { width = col_gap })
+            table.insert(row, LineWidget:new {
+                dimen = Geom:new { w = sep_w, h = tallest },
+                background = Blitbuffer.COLOR_GRAY_5,
+            })
+            table.insert(row, HorizontalSpan:new { width = col_gap })
+        end
+        table.insert(row, VerticalGroup:new { align = "left", unpack(p.rows) })
+    end
+    local top = Screen:scaleBySize(6)
+    return VerticalGroup:new {
+        align = "left",
+        rule(cw),
+        VerticalSpan:new { width = top },
+        row,
+    }, Screen:scaleBySize(2) + top + tallest
 end
 
---- Turn the screen sideways for the sleep/lock screen, remembering what it was.
----
---- The restore path is KOReader's own: ScreenSaverWidget:onCloseWidget puts
---- Device.orig_rotation_mode back on wake, so a redraw on an RTC wake (which
---- re-enters this while already sideways) must not overwrite it — hence the
---- "only when currently upright" test. LockView restores it by hand.
---- @return boolean rotated
-local function ssEnterLandscape()
-    if not get("readingos_ss_landscape") then return false end
-    local ok, rotated = pcall(function()
-        local mode = Screen:getRotationMode()
-        if mode % 2 == 1 then return false end -- already in some landscape
-        Device.orig_rotation_mode = mode
-        Screen:setRotationMode(Screen.DEVICE_ROTATED_CLOCKWISE)
-        return true
-    end)
-    return ok and rotated or false
-end
-
-local function ssRestoreRotation()
-    if not Device.orig_rotation_mode then return end
-    pcall(function() Screen:setRotationMode(Device.orig_rotation_mode) end)
-    Device.orig_rotation_mode = nil
-end
-
---- One category column: OBOWIĄZKI / PORZĄDKI / PRADA at the top, owner
+--- One category column: JEDZENIE / SPRZĄTANIE / PRADA at the top, owner
 --- sub-sections below it separated by a dashed rule. Leo picked design A's
 --- boxes with design C's split, so the box is the page's own frame and the
 --- vertical rules between columns — not a card floating per category.
@@ -3582,7 +3674,9 @@ local function ssColumn(width, g, f)
         h = h + height
     end
 
-    put(ssLine(width, tostring(g.cat or "?"), tostring(g.total or ""), f.cat, f.meta, true))
+    local title = string.format("%s  (%s)", tostring(g.cat or "?"), tostring(g.total or ""))
+    local head = ssText(title, f.cat, false, width - Screen:scaleBySize(40))
+    put(ssPair(width, (g.icon and g.icon ~= "") and ssIconed(g.icon, head) or head))
     put(rule(width), Screen:scaleBySize(2))
     put(VerticalSpan:new { width = Screen:scaleBySize(5) }, Screen:scaleBySize(5))
 
@@ -3613,9 +3707,9 @@ function ReadingOS:ssWidget(d, stale, lock_label)
     local pad = Screen:scaleBySize(14)
     local box = Screen:scaleBySize(2)      -- the page's own frame, design A
     local cw = W - 2 * (pad + box)
-    local f_head, f_cat, f_who = ssFace(1.3), ssFace(1.1), ssFace(1)
+    local f_big, f_head, f_cat, f_who = ssFace(1.5), ssFace(1.3), ssFace(1.1), ssFace(1)
     local f_row, f_meta = ssFace(1), ssFace(0.8)
-
+    local sep_w = Screen:scaleBySize(1)
     local rows, used = {}, 0
     local function add(widget, height)
         rows[#rows + 1] = widget
@@ -3625,35 +3719,109 @@ function ReadingOS:ssWidget(d, stale, lock_label)
         local h = Screen:scaleBySize(px)
         add(VerticalSpan:new { width = h }, h)
     end
+    local function hspan(px) return HorizontalSpan:new { width = Screen:scaleBySize(px) } end
+    local function vrule(h)
+        return LineWidget:new { dimen = Geom:new { w = sep_w, h = h }, background = Blitbuffer.COLOR_GRAY_5 }
+    end
+    --- Items side by side; widths summed by hand so nothing re-measures a group
+    --- after it was built.
+    local function strip(items)
+        local w = 0
+        for _, it in ipairs(items) do w = w + it:getSize().w end
+        return HorizontalGroup:new { align = "center", unpack(items) }, w
+    end
 
-    -- ---- header. Clock and battery: the two things a sleeping device is asked.
+    -- ---- header: date | clock | weather cells ... battery.
     local clock = os.date("%H:%M")
     local batt = ""
     local ok_b, cap = pcall(function() return Device:getPowerDevice():getCapacity() end)
     if ok_b and type(cap) == "number" then batt = string.format("\u{26A1} %d%%", cap) end
-    add(ssLine(cw, plDate():upper() .. "   " .. clock, batt, f_head, f_meta, true))
+    local batt_w = ssText(batt ~= "" and batt or " ", f_head)
+    local date_w = ssText(plDate():upper(), f_big)
+    local dh = date_w:getSize().h
+    local head = { date_w, hspan(12), vrule(dh), hspan(12), ssText(clock, f_big) }
+    local head_w = 0
+    for _, it in ipairs(head) do head_w = head_w + it:getSize().w end
+    local room = cw - batt_w:getSize().w - Screen:scaleBySize(16)
+    local weather = type(d) == "table" and type(d.weather) == "table" and d.weather or nil
+    -- Cells drop from the right when the panel runs out of width — wind first,
+    -- temperature last. Never a guessed or partial number.
+    for i, c in ipairs(weather and weather.cells or {}) do
+        local big = tostring(c.big or "")
+        if i == 1 and weather.stale then big = big .. " \u{00B7}" end -- same marker as the dashboard
+        local stack = { ssText(big, f_who) }
+        if c.small and c.small ~= "" then stack[2] = ssText(c.small, f_meta, true) end
+        local cell = HorizontalGroup:new {
+            align = "center",
+            icon(tostring(c.icon or "cloud"), dh),
+            hspan(6),
+            VerticalGroup:new { align = "left", unpack(stack) },
+        }
+        local extra = Screen:scaleBySize(28) + sep_w + cell:getSize().w
+        if head_w + extra > room then break end
+        for _, it in ipairs({ hspan(14), vrule(dh), hspan(14), cell }) do head[#head + 1] = it end
+        head_w = head_w + extra
+    end
+    add(ssPair(cw, (strip(head)), batt_w))
+    gap(4)
+    add(rule(cw), Screen:scaleBySize(2))
+    gap(5)
+
+    -- ---- status: DZIŚ summary | nearest event ... cache marker.
+    local totals = (d and d.totals) or {}
+    local summary = d and d.summary
+    if not summary then -- a pre-v2.0 payload still sitting in the cache file
+        local n = tonumber(totals.tasks) or 0
+        local m10, m100 = n % 10, n % 100
+        summary = string.format("%d %s", n, n == 1 and "zadanie"
+            or (m10 >= 2 and m10 <= 4 and not (m100 >= 12 and m100 <= 14)) and "zadania" or "zadań")
+        if (tonumber(totals.past) or 0) > 0 then
+            summary = summary .. string.format(" \u{00B7} %d po terminie", totals.past)
+        end
+    end
+    local right_w
+    if stale then
+        local at = d and tonumber(d._cached_at)
+        local marker = ssText("cache", f_meta)
+        right_w = HorizontalGroup:new {
+            align = "center",
+            icon("warn", marker:getSize().h * 2),
+            hspan(6),
+            VerticalGroup:new {
+                align = "left",
+                marker,
+                ssText(at and ("dane " .. os.date("%H:%M", at)) or "dane ?", f_meta, true),
+            },
+        }
+    end
+    local status, status_w = { ssText("DZIŚ", f_head), hspan(12), ssText(summary, f_row) }, 0
+    for _, it in ipairs(status) do status_w = status_w + it:getSize().w end
+    local nx = type(d) == "table" and type(d.calendar) == "table" and d.calendar.next or nil
+    if type(nx) == "table" and nx.line then
+        local label = ssText("NAJBLIŻSZE", f_meta)
+        local lh = ssText(nx.line, f_row):getSize().h
+        local fixed = Screen:scaleBySize(28) + sep_w + lh + Screen:scaleBySize(6)
+            + label:getSize().w + Screen:scaleBySize(8)
+        local avail = cw - status_w - fixed - (right_w and right_w:getSize().w + Screen:scaleBySize(16) or 0)
+        -- Too narrow to say anything useful → leave it to the KALENDARZ panel.
+        if avail > Screen:scaleBySize(120) then
+            for _, it in ipairs({ hspan(14), vrule(lh), hspan(14), icon("clock", lh), hspan(6),
+                label, hspan(8), ssText(nx.line, f_row, false, avail) }) do
+                status[#status + 1] = it
+            end
+        end
+    end
+    add(ssPair(cw, (strip(status)), right_w))
+    gap(5)
     add(rule(cw), Screen:scaleBySize(2))
     gap(6)
 
-    local totals = (d and d.totals) or {}
-    local head = string.format("DZIŚ  %d %s", tonumber(totals.tasks) or 0,
-        (tonumber(totals.tasks) or 0) == 1 and "zadanie" or "zadań")
-    if (tonumber(totals.past) or 0) > 0 then
-        head = head .. string.format(" \u{00B7} %d po terminie", totals.past)
-    end
-    add(ssLine(cw, head, stale and "z cache" or "", f_who, f_meta, true))
-    gap(6)
-
-    -- The lab band is measured up front and its height reserved, so a long task
-    -- list pushes rows out of itself rather than pushing the lab off the screen.
-    local lab_rows = get("readingos_ss_lab") and ssLabRows(cw, d and d.lab) or {}
-    local lab_h = 0
-    for _, r in ipairs(lab_rows) do lab_h = lab_h + r[2] end
-
-    local footer_h = Screen:scaleBySize(24)
-    local budget = H - 2 * (pad + box) - used - lab_h - footer_h
+    -- The bottom band is measured up front and its height reserved, so a long
+    -- task list pushes rows out of itself rather than pushing the band off.
+    local band, band_h = ssBand(cw, d, get("readingos_ss_lab"))
+    local footer_h = ssText("readingos", f_who):getSize().h + Screen:scaleBySize(1) + Screen:scaleBySize(4)
+    local budget = H - 2 * (pad + box) - used - band_h - footer_h
     local skipped = 0
-
     -- One column per category, side by side, the way both mockups read it. On a
     -- portrait screen there is no room for that, so the categories stack and the
     -- page is the old single column.
@@ -3684,7 +3852,8 @@ function ReadingOS:ssWidget(d, stale, lock_label)
             for _, w in ipairs(widgets) do table.insert(cols[pick], w[1]) end
             col_h[pick] = col_h[pick] + lead + ch
         else
-            skipped = skipped + (tonumber(g.total) or 0)
+            -- v2.0 counts categories, matching "+N kategoria dalej".
+            skipped = skipped + 1
         end
     end
 
@@ -3714,22 +3883,33 @@ function ReadingOS:ssWidget(d, stale, lock_label)
         gap(6)
     end
 
-    for _, r in ipairs(lab_rows) do add(r[1], r[2]) end
+    if band then add(band, band_h) end
 
     -- ---- footer, pinned to the bottom by whatever space is left over.
     local slack = H - 2 * (pad + box) - used - footer_h
     if slack > 0 then add(VerticalSpan:new { width = slack }, slack) end
     add(rule(cw, true), Screen:scaleBySize(1))
     gap(4)
-    local left = "readingos \u{00B7} " .. clock
-    if skipped > 0 then left = left .. string.format("  \u{00B7} +%d dalej", skipped) end
-    local rtc = tonumber(get("readingos_ss_refresh_rtc")) or 0
-    local right = rtc > 0 and ("odśwież za " .. math.floor(rtc / 60) .. " min") or ""
-    if lock_label then right = lock_label end
-    add(ssLine(cw, left, right, f_meta, lock_label and f_who or f_meta, not lock_label))
+    local ok_v, ver = pcall(function() return self:localVersion() end)
+    local mid = "v" .. (ok_v and tostring(ver) or "?") .. " \u{00B7} " .. clock
+    if skipped > 0 then
+        local word = skipped == 1 and "kategoria" or (skipped <= 4 and "kategorie" or "kategorii")
+        mid = mid .. string.format(" \u{00B7} +%d %s dalej", skipped, word)
+    end
+    local left_w = HorizontalGroup:new { align = "center", ssText("readingos", f_who), hspan(12), ssText(mid, f_meta, true) }
+    local footer_right
+    if lock_label then
+        footer_right = ssText(lock_label, f_who)
+    else
+        local rtc = tonumber(get("readingos_ss_refresh_rtc")) or 0
+        if rtc > 0 then
+            footer_right = ssIconed("refresh", ssText("odśwież za " .. math.floor(rtc / 60) .. " min", f_meta, true))
+        end
+    end
+    add(ssPair(cw, left_w, footer_right))
 
-    -- The page is one box: header band, ruled columns, LAB band, all inside a
-    -- single frame (design A). Margin, not padding, keeps the border off the
+    -- The page is one box: header band, ruled columns, bottom band, all inside
+    -- a single frame (design A). Margin, not padding, keeps the border off the
     -- very edge of the panel, where a Kindle bezel eats a hairline.
     return FrameContainer:new {
         background = Blitbuffer.COLOR_WHITE,
