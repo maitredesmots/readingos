@@ -3480,6 +3480,10 @@ local function ssText(text, f, gray, max_width)
         face = f,
         fgcolor = gray and Blitbuffer.COLOR_GRAY_5 or nil,
         max_width = max_width,
+        -- TextWidget adds Size.padding.small above and below every line by
+        -- default (8 px per line on a PW3); on a page that must fit whole
+        -- categories that air cost SPRZĄTANIE its column.
+        padding = 0,
     }
 end
 
