@@ -3662,6 +3662,31 @@ local function ssBand(cw, d, with_lab)
     }, Screen:scaleBySize(2) + top + tallest
 end
 
+--- Turn the screen sideways for the sleep/lock screen, remembering what it was.
+---
+--- The restore path is KOReader's own: ScreenSaverWidget:onCloseWidget puts
+--- Device.orig_rotation_mode back on wake, so a redraw on an RTC wake (which
+--- re-enters this while already sideways) must not overwrite it — hence the
+--- "only when currently upright" test. LockView restores it by hand.
+--- @return boolean rotated
+local function ssEnterLandscape()
+    if not get("readingos_ss_landscape") then return false end
+    local ok, rotated = pcall(function()
+        local mode = Screen:getRotationMode()
+        if mode % 2 == 1 then return false end -- already in some landscape
+        Device.orig_rotation_mode = mode
+        Screen:setRotationMode(Screen.DEVICE_ROTATED_CLOCKWISE)
+        return true
+    end)
+    return ok and rotated or false
+end
+
+local function ssRestoreRotation()
+    if not Device.orig_rotation_mode then return end
+    pcall(function() Screen:setRotationMode(Device.orig_rotation_mode) end)
+    Device.orig_rotation_mode = nil
+end
+
 --- One category column: JEDZENIE / SPRZĄTANIE / PRADA at the top, owner
 --- sub-sections below it separated by a dashed rule. Leo picked design A's
 --- boxes with design C's split, so the box is the page's own frame and the
