@@ -72,6 +72,7 @@ local DEFAULTS = {
     readingos_lock_minutes = 30,     -- on-demand lock screen auto-unlocks after
     readingos_ss_landscape = true,   -- three categories side by side need the width
     readingos_device_id = "",        -- generated once on first "Telefon" open, never regenerated
+    readingos_presence_seconds = 60, -- Phone Companion heartbeat while awake + on Wi-Fi; 0 = off
     readingos_craft_font = 0,        -- CraftView instruction size, -2..+2 steps around the default
     readingos_craft_awake = 0,       -- last "nie gaś ekranu" choice in minutes, re-applied on open
 }
@@ -626,17 +627,29 @@ end
 --- room actually left over. A flat percentage does not work — "expires 08-05"
 --- and "rations · restock" are wildly different widths, and on the first device
 --- run the long ones ran straight underneath the left-hand text.
-local function lrRow(width, height, left, right, left_face, right_face, right_gray)
+local icon -- defined below with the icon set; lrRow's close X uses it
+
+--- `close` puts the X at the far right: the one close control every ReadingOS
+--- screen shares (same icon, same corner as KOReader's own lists and WIĘCEJ),
+--- closing just this screen. The caller still makes the whole row the target.
+local function lrRow(width, height, left, right, left_face, right_face, right_gray, close)
     local group = OverlapGroup:new { dimen = { w = width, h = height } }
     local gap = Screen:scaleBySize(10)
 
-    if right and right ~= "" then
-        local right_widget = TextWidget:new {
-            text = right,
-            face = right_face or left_face,
-            fgcolor = right_gray and Blitbuffer.COLOR_GRAY_5 or nil,
-            max_width = math.floor(width * 0.55), -- truncate rather than collide
-        }
+    if (right and right ~= "") or close then
+        local right_widget = HorizontalGroup:new { align = "center" }
+        if right and right ~= "" then
+            table.insert(right_widget, TextWidget:new {
+                text = right,
+                face = right_face or left_face,
+                fgcolor = right_gray and Blitbuffer.COLOR_GRAY_5 or nil,
+                max_width = math.floor(width * 0.55), -- truncate rather than collide
+            })
+        end
+        if close then
+            if #right_widget > 0 then table.insert(right_widget, HorizontalSpan:new { width = gap * 2 }) end
+            table.insert(right_widget, icon("close", height))
+        end
         local rw = right_widget:getSize().w
         local left_room = math.max(Screen:scaleBySize(40), width - rw - gap)
         table.insert(group, LeftContainer:new {
@@ -730,7 +743,7 @@ local function iconFile(name, svg)
 end
 
 --- A square icon `size` px wide: a KOReader icon by name, or one of ICON_SVG.
-local function icon(name, size)
+function icon(name, size)
     local ok, w = pcall(function()
         local svg = ICON_SVG[name]
         if svg then
@@ -1825,7 +1838,7 @@ function TaskDetail:build()
         y = y + h
     end
 
-    add(lrRow(cw, h_meta, "‹  " .. _("Zadanie"), "", faceFull(SIZE_META), faceFull(SIZE_META), true),
+    add(lrRow(cw, h_meta, _("Zadanie"), "", faceFull(SIZE_META), faceFull(SIZE_META), true, true),
         h_meta, { kind = "back" })
     add(rule(cw), Screen:scaleBySize(2))
     gap(8)
@@ -2134,83 +2147,99 @@ function ReadingOS:handle(dashboard, target, is_hold)
     if target.screen then return self:openScreen(dashboard, target.screen) end
 end
 
---- WIĘCEJ: three groups, most-used first, one screen (ADHD rule: as few
---- taps as possible between intent and action). Działania are things you
---- do now; Ekrany are the surfaces that left the dashboard; Ustawienia
---- opens KOReader's own ReadingOS submenu (the one under Narzędzia) rather
---- than duplicating its toggles here — one definition, one place to fix.
---- Group headers are `inert` rows (full black, not tappable, not dimmed).
-function ReadingOS:openMore(dashboard)
-    local items = {
-        { text = "— DZIAŁANIA —", inert = true },
-        { text = "ODŚWIEŻ", action = "refresh" },
-        { text = "TELEFON", action = "phone" },
-        { text = "ZABLOKUJ EKRAN", action = "lock" },
-        { text = "— EKRANY —", inert = true },
-        { text = "CRAFTSSS", screen = "crafts" },
-        { text = "NAUKA", screen = "learn" },
-        { text = "DIG", screen = "dig" },
-        { text = "NOTATKI", screen = "notes" },
-        { text = "ARTYKUŁY", screen = "articles" },
-        { text = "— USTAWIENIA —", inert = true },
-        { text = "USTAWIENIA", action = "settings" },
-        { text = "SPRAWDŹ AKTUALIZACJE  (v" .. self:localVersion() .. ")", action = "update" },
-        { text = "JAK TO DZIAŁA", screen = "help" },
-    }
-    self:showList("WIĘCEJ", items, function(item, menu)
-        UIManager:close(menu)
-        if item.action == "refresh" then
-            self:refreshNow(dashboard)
-        elseif item.action == "phone" then
-            self:showPhone()
-        elseif item.action == "lock" then
-            self:showLockScreen()
-        elseif item.action == "settings" then
-            self:openSettings()
-        elseif item.action == "update" then
-            self:checkForUpdate(false)
-        elseif item.screen then
-            self:openScreen(dashboard, item.screen)
-        end
-    end)
-end
-
---- WIĘCEJ → USTAWIENIA: the settings list (settingsItems), shown through
---- KOReader's own TouchMenu so every toggle, spinner and text editor behaves
---- exactly as it does in KOReader's menu.
-function ReadingOS:openSettings()
+--- WIĘCEJ: KOReader's TouchMenu, the same widget USTAWIENIA always used —
+--- one icon per tab on the bar at the top, X last (closes WIĘCEJ, same icon
+--- and place as every other ReadingOS screen's close). Tabs, most-used first
+--- (ADHD rule: one tap from WIĘCEJ to the action): DZIAŁANIA (things you do
+--- now), EKRANY (surfaces that left the dashboard), USTAWIENIA, INFORMACJE.
+--- `start_tab` opens on a given tab; `dashboard` nil (Tools → ReadingOS when
+--- the dashboard cannot open) leaves only the tabs that need no dashboard.
+function ReadingOS:openMore(dashboard, start_tab)
     local ok, err = pcall(function()
         local TouchMenu = require("ui/widget/touchmenu")
-        -- TouchMenu's tab_item_table[n] IS that tab's item list, carrying
-        -- its own .text/.icon (readermenu.lua does the same with the
-        -- registered tables).
-        local tab = self:settingsItems()
-        tab.text = _("ReadingOS")
-        tab.icon = "appbar.settings"
         local container = CenterContainer:new {
             covers_header = true,
             ignore = "height",
             dimen = Screen:getSize(),
+            readingos_screen = "more", -- Phone Companion: back closes it, next/prev page it
         }
-        local menu = TouchMenu:new {
-            width = Screen:getWidth(),
-            tab_item_table = { tab },
-            show_parent = container,
-        }
-        menu.close_callback = function()
-            track("settings", "back")
+        local menu
+        local function close()
+            track("więcej", "back")
             UIManager:close(container)
         end
+        -- Close WIĘCEJ first, then act: the screen an item opens must never
+        -- end up underneath the menu it was picked from.
+        local function item(text, run)
+            return {
+                text = text,
+                keep_menu_open = true,
+                callback = function()
+                    close()
+                    run()
+                end,
+            }
+        end
+        local tabs = {}
+        if dashboard then
+            tabs[#tabs + 1] = {
+                text = _("Działania"), icon = "appbar.tools",
+                item("ODŚWIEŻ", function() self:refreshNow(dashboard) end),
+                item("TELEFON", function() self:showPhone() end),
+                item("ZABLOKUJ EKRAN", function() self:showLockScreen() end),
+            }
+            tabs[#tabs + 1] = {
+                text = _("Ekrany"), icon = "appbar.navigation",
+                item("CRAFTSSS", function() self:openScreen(dashboard, "crafts") end),
+                item("NAUKA", function() self:openScreen(dashboard, "learn") end),
+                item("DIG", function() self:openScreen(dashboard, "dig") end),
+                item("NOTATKI", function() self:openScreen(dashboard, "notes") end),
+                item("ARTYKUŁY", function() self:openScreen(dashboard, "articles") end),
+            }
+        end
+        local settings = self:settingsItems()
+        settings.text = _("Ustawienia")
+        settings.icon = "appbar.settings"
+        tabs[#tabs + 1] = settings
+        local info = {
+            text = _("Informacje"), icon = "info",
+            {
+                text_func = function() return _("SPRAWDŹ AKTUALIZACJE") .. "  (v" .. self:localVersion() .. ")" end,
+                keep_menu_open = true,
+                callback = function() self:checkForUpdate(false) end,
+            },
+        }
+        if dashboard then
+            info[#info + 1] = item("JAK TO DZIAŁA", function() self:openScreen(dashboard, "help") end)
+        end
+        tabs[#tabs + 1] = info
+        -- The X: a tab that is never selected, only acts (remember = false —
+        -- the same trick KOReader's own menus use for their exit icon).
+        tabs[#tabs + 1] = { text = _("Zamknij"), icon = "close", remember = false, callback = close }
+
+        menu = TouchMenu:new {
+            width = Screen:getWidth(),
+            tab_item_table = tabs,
+            last_index = math.min(start_tab or 1, #tabs - 1),
+            show_parent = container,
+        }
+        menu.close_callback = close
         container[1] = menu
-        track("settings", "open")
+        track("więcej", "open")
         UIManager:show(container)
     end)
     if not ok then
-        logger.warn("ReadingOS: openSettings failed:", err)
+        logger.warn("ReadingOS: openMore failed:", err)
         UIManager:show(InfoMessage:new {
             text = _("Ustawienia: Narzędzia → ReadingOS – ustawienia (awaryjnie) w menu KOReadera."),
         })
     end
+end
+
+--- Settings alone (Tools → ReadingOS when the dashboard cannot open): the
+--- same WIĘCEJ menu without a dashboard, opened on its USTAWIENIA tab.
+function ReadingOS:openSettings()
+    return self:openMore(nil, 1)
 end
 
 function ReadingOS:openScreen(dashboard, screen)
@@ -2419,9 +2448,9 @@ function LearnView:build()
     local left = #self.queue - self.cursor + 1 + #self.again
 
     -- header: where you are, and everything the start screen would have said
-    add(lrRow(cw, h_meta, "‹  NAUKA",
+    add(lrRow(cw, h_meta, "NAUKA",
         card and string.format("%d / %d", self.cursor, #self.queue) or "koniec",
-        faceFull(SIZE_META), faceFull(SIZE_META), true), h_meta, { kind = "back" })
+        faceFull(SIZE_META), faceFull(SIZE_META), true, true), h_meta, { kind = "back" })
     local l = self.learn or {}
     add(LeftContainer:new { dimen = { w = cw, h = h_meta },
         TextWidget:new {
@@ -2446,7 +2475,7 @@ function LearnView:build()
             button(_("NASTĘPNE ") .. tostring((l.due or 0) - #self.queue), h_row, { kind = "more" })
             gap(10)
         end
-        button(_("WRÓĆ"), h_row, { kind = "back" })
+        button(_("ZAMKNIJ"), h_row, { kind = "back" })
     else
         -- the card itself: front always, back only once asked for
         gap(60)
@@ -2647,21 +2676,28 @@ function CraftQR:init()
     -- on purpose rather than computed — white is free on this panel.
     local quiet = Screen:scaleBySize(48)
     local side = math.min(W - 2 * quiet, Screen:scaleBySize(400))
+    -- Same X, same corner as every other ReadingOS screen (the whole sheet
+    -- still closes on any tap). "COFNIJ" was dropped: it is CraftView's undo.
+    local pad = Screen:scaleBySize(16)
+    local x_size = Screen:scaleBySize(36)
     self[1] = FrameContainer:new {
         background = Blitbuffer.COLOR_WHITE, bordersize = 0, padding = 0, width = W, height = H,
-        CenterContainer:new { dimen = Geom:new { w = W, h = H },
-            VerticalGroup:new { align = "center",
-                TextWidget:new { text = self.title or "", face = faceFull(SIZE_ROW), max_width = W - 2 * quiet },
-                VerticalSpan:new { width = quiet },
-                -- scale_factor = 1, as QRMessage does: the modules are drawn
-                -- at an integer size and centred in the box, never resampled
-                -- to fit it — a smoothed QR is grey at the edges on e-ink.
-                FrameContainer:new { background = Blitbuffer.COLOR_WHITE, bordersize = 0, padding = quiet,
-                    QRWidget:new { text = self.url, width = side, height = side, scale_factor = 1 } },
-                VerticalSpan:new { width = quiet },
-                TextWidget:new { text = _("COFNIJ · dotknij, by wrócić do wzoru"), face = faceFull(SIZE_META),
-                    fgcolor = Blitbuffer.COLOR_GRAY_5, max_width = W - 2 * quiet },
-            } },
+        OverlapGroup:new { dimen = Geom:new { w = W, h = H },
+            CenterContainer:new { dimen = Geom:new { w = W, h = H },
+                VerticalGroup:new { align = "center",
+                    TextWidget:new { text = self.title or "", face = faceFull(SIZE_ROW), max_width = W - 2 * quiet },
+                    VerticalSpan:new { width = quiet },
+                    -- scale_factor = 1, as QRMessage does: the modules are drawn
+                    -- at an integer size and centred in the box, never resampled
+                    -- to fit it — a smoothed QR is grey at the edges on e-ink.
+                    FrameContainer:new { background = Blitbuffer.COLOR_WHITE, bordersize = 0, padding = quiet,
+                        QRWidget:new { text = self.url, width = side, height = side, scale_factor = 1 } },
+                    VerticalSpan:new { width = quiet },
+                    TextWidget:new { text = _("dotknij w dowolnym miejscu, żeby zamknąć"), face = faceFull(SIZE_META),
+                        fgcolor = Blitbuffer.COLOR_GRAY_5, max_width = W - 2 * quiet },
+                } },
+            RightContainer:new { dimen = Geom:new { w = W - pad, h = x_size + 2 * pad }, icon("close", x_size) },
+        },
     }
 end
 
@@ -2933,7 +2969,7 @@ function CraftView:build()
     local cur = list[self.cursor]
 
     -- header: what this is, and the count that answers "how much is left"
-    local head = "‹  " .. self.pattern.title
+    local head = self.pattern.title
     if self.pattern.size then head = head .. " · " .. tostring(self.pattern.size) end
     -- Rows from disk, not from the server: say so once, in the header, where
     -- the dashboard already says it. Nothing else changes — an offline
@@ -2941,7 +2977,7 @@ function CraftView:build()
     if self.stale then head = head .. " · offline" end
     add(lrRow(cw, h_meta, head,
         string.format("%d / %d", math.min(self.cursor, total), total),
-        faceFull(SIZE_META), faceFull(SIZE_META), true), { kind = "back" })
+        faceFull(SIZE_META), faceFull(SIZE_META), true, true), { kind = "back" })
     add(ProgressWidget:new {
         width = cw, height = Screen:scaleBySize(7),
         percentage = total > 0 and (doneCount / total) or 0,
@@ -4358,26 +4394,60 @@ function ReadingOS:showLockScreen()
     UIManager:show(LockView:new { plugin = self, data = data, stale = stale }, "full")
 end
 
--- Heartbeat: tells the backend this device is still alive, so the phone's
--- "connected" dot means something. Piggybacks on showPhone()'s existing 8s
--- tick rather than a loop of its own — nothing schedules this outside that
--- tick. request() already no-ops on failure (returns nil, err) instead of
--- throwing, so a dropped network here can never take the tick down with it.
-local function heartbeat(id)
-    request("POST", baseUrl() .. "/api/readingos/phone/heartbeat", encode({ device_id = id }))
+-- ------------------------------------------------ Phone Companion presence
+--
+-- One heartbeat for the whole plugin, not tied to any screen: every
+-- `readingos_presence_seconds` (60 s) while the Kindle is awake and already on
+-- Wi-Fi, every PRESENCE_FAST_SECONDS while the server says a paired phone has
+-- its page open. It says what is on screen, and while a phone is looking the
+-- next remote command rides back in the same response.
+--
+-- Battery: UIManager schedules on CLOCK_MONOTONIC, which stops in suspend, so
+-- nothing runs while the Kindle sleeps; the overdue tick that fires on the
+-- 15-minute RTC bounce is skipped by the same asleep test the dashboard's
+-- rev poll uses. It never turns Wi-Fi on (NetworkMgr:isConnected() first —
+-- request() would otherwise block for its socket timeout), and a Kindle that
+-- has never opened TELEFON (no device id) sends nothing at all.
+local PRESENCE_FAST_SECONDS = 8
+local PRESENCE_OFF_RECHECK = 300 -- setting at 0 or never paired: re-read, no network
+-- KOReader builds one plugin instance per FileManager/ReaderUI; only the newest
+-- one ticks, so a book opened from the file browser never doubles the rate.
+local presence_owner = nil
+
+local function heartbeat(id, screen, detail, interval)
+    local res = request("POST", baseUrl() .. "/api/readingos/phone/heartbeat",
+        encode({ device_id = id, name = "Kindle", screen = screen, detail = detail, interval = interval }))
+    local data = res and decode(res)
+    return type(data) == "table" and data or nil
+end
+
+--- What the phone shows as "Na ekranie": the topmost ReadingOS screen by its
+--- `readingos_screen` tag, else the open book, else KOReader itself. A name
+--- and, for CraftView/lists, a title — never the screen's contents.
+local function currentScreen(plugin)
+    local ok, stack = pcall(function() return UIManager._window_stack end)
+    for i = #((ok and stack) or {}), 1, -1 do
+        local w = stack[i].widget
+        if w and w.readingos_screen then
+            local detail
+            if w.readingos_screen == "craft" and type(w.pattern) == "table" then
+                detail = { title = w.pattern.title, row = w.cursor, total = #(w.pattern.rows or {}) }
+            elseif w.readingos_screen == "menu" and type(w.title) == "string" then
+                detail = { title = w.title }
+            end
+            return w.readingos_screen, detail
+        end
+    end
+    if plugin.ui and plugin.ui.document then return "reader" end
+    return "other"
 end
 
 -- ------------------------------------------------------ V2: BASIC REMOTE
 --
 -- Peek-then-ack-then-execute, one command at a time — see hooome's
 -- src/readingos/remoteCommands.js for the server side of this same state
--- machine (queued -> acked -> done|failed, or queued -> expired).
-
-local function fetchNextCommand(id)
-    local res = request("GET", baseUrl() .. "/api/readingos/phone/command/next?device=" .. id)
-    local data = res and decode(res)
-    return data and data.command or nil
-end
+-- machine (queued -> acked -> done|failed, or queued -> expired). The peek is
+-- the heartbeat response's `command` (presence tick below).
 
 --- @return boolean won true only if this tick is the one that gets to execute
 --- the command — a 409 (already acked/expired by a retried poll, or owned by
@@ -4474,6 +4544,10 @@ local function executeRemoteCommand(plugin, cmd)
         -- navigation. Dashboard/TaskDetail/LearnView/CraftView/LockView have
         -- no pagination or scroll of any kind — confirmed by reading this
         -- file, not assumed — so every other screen is unsupported_on_screen.
+        if top and top.readingos_screen == "more" and top[1] and top[1].onNextPage then
+            if cmd == "next" then top[1]:onNextPage() else top[1]:onPrevPage() end
+            return "done", nil
+        end
         if not top or top.readingos_screen ~= "menu" then return "failed", "unsupported_on_screen" end
         if cmd == "next" then top:onNextPage() else top:onPrevPage() end
         return "done", nil
@@ -4491,22 +4565,63 @@ local function executeRemoteCommand(plugin, cmd)
     return "failed", "unknown_command" -- unreachable in practice: hooome validates against this same allowlist first
 end
 
+--- Runs one presence tick; see the block comment above `heartbeat`.
+function ReadingOS:presenceTick()
+    if presence_owner ~= self then return end
+    local idle = tonumber(get("readingos_presence_seconds")) or 60
+    local id = tostring(get("readingos_device_id") or "")
+    local active = idle > 0 and id ~= "" and getToken() ~= ""
+    local next_in = active and idle or PRESENCE_OFF_RECHECK
+    if active then
+        local asleep = Device.screen_saver_mode or self.simulated_wakeup
+        local ok, connected = pcall(function() return NetworkMgr:isConnected() end)
+        if not asleep and ok and connected then
+            local screen, detail = currentScreen(self)
+            local res = heartbeat(id, screen, detail, self.presence_fast and PRESENCE_FAST_SECONDS or idle)
+            self.presence_fast = res ~= nil and res.phone_active == true
+            local cmd = res and res.command
+            -- Ack first: only the tick that wins the ack (not a 409 from an
+            -- already-acked/expired row) executes, so nothing runs twice.
+            if type(cmd) == "table" and cmd.id and cmd.cmd and ackCommand(cmd.id, id) then
+                -- pcall: a bad screen state must never take the tick down.
+                local ok_x, status, result = pcall(executeRemoteCommand, self, cmd.cmd)
+                local cmd_id = cmd.id
+                -- Next UI tick, so the repaint the command queued runs first;
+                -- then the new screen goes out at once instead of 8 s later.
+                UIManager:scheduleIn(0, function()
+                    if ok_x then
+                        postCommandResult(cmd_id, id, status, result)
+                    else
+                        postCommandResult(cmd_id, id, "failed", "error")
+                    end
+                    local s2, d2 = currentScreen(self)
+                    heartbeat(id, s2, d2, PRESENCE_FAST_SECONDS)
+                end)
+            end
+        end
+    else
+        self.presence_fast = false
+    end
+    if self.presence_fast then next_in = PRESENCE_FAST_SECONDS end
+    UIManager:scheduleIn(next_in, self.presence_task)
+end
+
+function ReadingOS:startPresence(delay)
+    presence_owner = self
+    if self.presence_task then UIManager:unschedule(self.presence_task) end
+    self.presence_task = function() self:presenceTick() end
+    UIManager:scheduleIn(delay or PRESENCE_FAST_SECONDS, self.presence_task)
+end
+
+function ReadingOS:stopPresence()
+    if self.presence_task then UIManager:unschedule(self.presence_task) end
+    if presence_owner == self then presence_owner = nil end
+end
+
 -- Shows a QR the phone scans, then polls whether it's been consumed while the
--- QR is on screen. V2 adds BASIC REMOTE (home/back/next/prev/close/refresh)
--- on top of the same post-pair tick — still no state mirror, no screenshots,
--- no content bridge, no arbitrary item selection.
---
--- Poll cadence: every 8s, same "only while this specific view is open"
--- shape as LockView's tick — never a background loop, unscheduled on close.
--- The same tick also heartbeats and (once paired) polls/executes at most one
--- remote command per tick: while the QR is up AND while the "✓ Telefon
--- sparowany" confirmation stays on screen afterwards (an InfoMessage the
--- user hasn't tapped away yet — same as InfoMessage always behaves
--- elsewhere in this file, nothing new). Tapping it closed is what ends the
--- heartbeat/command polling; nothing runs once "Telefon" is no longer on
--- screen. 8s was kept as-is rather than tightened for V2 — untested whether
--- that reads as responsive enough on a real PW3; revisit after physical
--- testing if it feels sluggish.
+-- QR is on screen (every 8 s, only while the QR is up). Once paired, the
+-- phone opens its own page and the presence tick above takes over — status,
+-- screen name and the remote no longer depend on this screen staying open.
 function ReadingOS:showPhone()
     local id = deviceId()
     local body = encode({ device_id = id, name = "Kindle" })
@@ -4525,29 +4640,12 @@ function ReadingOS:showPhone()
     end
     track("phone", "pair_request", nil)
 
-    -- Wake lock, same shape as CraftView:setAwake/releaseAwake above (this
-    -- file's own established pattern — not a new mechanism): the heartbeat
-    -- above only runs because poll_task keeps re-scheduling itself via
-    -- UIManager:scheduleIn, and this device's own idle power management
-    -- (auto-standby/auto-suspend) freezes that scheduling once the Kindle
-    -- goes untouched — exactly the case here, since the whole point of
-    -- Phone Companion is that every tap happens on the *phone*, never on
-    -- the Kindle. Confirmed on a real PW3: heartbeat landed a few times
-    -- then silently stopped while the screen kept showing "sparowany" (the
-    -- E-Ink frame doesn't care whether the CPU is still running).
-    --
-    -- `preventStandby`/`allowStandby` are a refcounted pair — an unmatched
-    -- allowStandby() is a hard assert crash in UIManager, so `locked` guards
-    -- against ever releasing twice or releasing without having acquired.
-    -- Held only for as long as a Phone Companion screen (QR, or the
-    -- post-pair confirmation) is actually up; released on every exit path
-    -- below, never left standing once "Telefon" is off screen.
+    -- Wake lock while the QR is up, same shape as CraftView:setAwake: nobody
+    -- touches the Kindle while scanning, and idle power management would
+    -- otherwise freeze the poll below. `preventStandby`/`allowStandby` are a
+    -- refcounted pair — an unmatched allowStandby() is a hard assert crash in
+    -- UIManager, so `locked` guards against releasing twice.
     local locked = false
-    local function lockStandby()
-        if locked then return end
-        locked = true
-        UIManager:preventStandby()
-    end
     local function releaseStandby()
         if not locked then return end
         locked = false
@@ -4562,72 +4660,23 @@ function ReadingOS:showPhone()
         height = Screen:scaleBySize(420),
         timeout = 90,
         dismiss_callback = function()
+            -- user dismiss, the 90 s timeout, or our own close on success
             if poll_task then UIManager:unschedule(poll_task) end
-            -- Fires on user-dismiss, the QR's own 90s timeout, AND our own
-            -- programmatic UIManager:close(qr) below on pairing success —
-            -- in that last case the lock is re-taken immediately after for
-            -- the paired-confirmation phase (see below), so the session
-            -- never actually goes unlocked in between; every other case
-            -- means the session is genuinely over.
             releaseStandby()
         end,
     }
 
     poll_task = function()
-        heartbeat(id)
         local status_res = request("GET", baseUrl() .. "/api/readingos/phone/pair/" .. token .. "/status")
         local status = status_res and decode(status_res)
         if status and status.consumed then
             track("phone", "paired", nil)
-            UIManager:close(qr) -- releases the QR-phase lock via dismiss_callback above
-            lockStandby() -- re-acquire for the confirmation phase below — same tick, no gap
-
-            -- Kept alive by the InfoMessage staying open (dismissable, no
-            -- timeout): each tick from here just heartbeats, no more
-            -- pairing status to check. Tapping it away unschedules AND
-            -- releases the lock — the last exit path of this session.
-            local paired_msg
-            paired_msg = InfoMessage:new {
-                text = _("✓ Telefon sparowany."),
-                dismiss_callback = function()
-                    UIManager:unschedule(poll_task)
-                    releaseStandby()
-                end,
-            }
-            poll_task = function()
-                heartbeat(id)
-
-                -- At most one command per tick, never a batch — e-ink
-                -- execution is strictly serial. Ack first: only the tick that
-                -- wins the ack (not a 409 from an already-acked/expired row)
-                -- ever calls executeRemoteCommand, so a retried/duplicate
-                -- poll can never double-execute the same command.
-                local cmd = fetchNextCommand(id)
-                if cmd and cmd.id and cmd.cmd and ackCommand(cmd.id, id) then
-                    -- pcall: a bad/unexpected screen state inside dispatch
-                    -- must never take the heartbeat/pairing tick down with
-                    -- it. Result is posted via scheduleIn(0, ...) rather than
-                    -- immediately after dispatch returns — the closest thing
-                    -- to "after the render settled" KOReader's APIs expose to
-                    -- plugin code: setDirty only *enqueues* a repaint, it
-                    -- never blocks or calls back, so this yields one tick to
-                    -- let that repaint run first rather than reporting DONE
-                    -- in the same instant the command was merely dispatched.
-                    local ok, status, result = pcall(executeRemoteCommand, self, cmd.cmd)
-                    local cmd_id = cmd.id
-                    UIManager:scheduleIn(0, function()
-                        if ok then
-                            postCommandResult(cmd_id, id, status, result)
-                        else
-                            postCommandResult(cmd_id, id, "failed", "error")
-                        end
-                    end)
-                end
-
-                UIManager:scheduleIn(8, poll_task)
-            end
-            UIManager:show(paired_msg)
-            UIManager:scheduleIn(8, poll_task)
+            UIManager:close(qr)
+            UIManager:show(InfoMessage:new {
+                text = _("✓ Telefon sparowany. Panel ReadingOS jest teraz na telefonie."),
+                timeout = 5,
+            })
+            self:startPresence(0)
             return
         end
         if status and status.expired then
@@ -4636,7 +4685,8 @@ function ReadingOS:showPhone()
         UIManager:scheduleIn(8, poll_task)
     end
 
-    lockStandby() -- acquired right before the timed loop actually starts
+    locked = true
+    UIManager:preventStandby()
     UIManager:show(qr)
     UIManager:scheduleIn(8, poll_task)
 end
@@ -4778,6 +4828,7 @@ function ReadingOS:onResume()
 end
 
 function ReadingOS:onCloseWidget()
+    self:stopPresence()
     if self.rtc_scheduled and self.wakeup_mgr then
         self.wakeup_mgr:removeTasks(nil, self.rtcRefreshCallback)
         self.rtc_scheduled = false
@@ -4950,6 +5001,22 @@ function ReadingOS:settingsItems()
                 separator = true,
             },
             {
+                -- Phone Companion presence tick (see presenceTick): off = the
+                -- phone shows "uśpiony" and the remote waits; on costs one
+                -- small request a minute, only while awake and already on Wi-Fi.
+                text_func = function()
+                    local sec = tonumber(get("readingos_presence_seconds")) or 60
+                    return "Widoczność na telefonie: " .. (sec > 0 and ("co " .. sec .. " s") or "wyłączona")
+                end,
+                keep_menu_open = true,
+                callback = function(touchmenu)
+                    local sec = tonumber(get("readingos_presence_seconds")) or 60
+                    set("readingos_presence_seconds", sec > 0 and 0 or 60)
+                    if touchmenu then touchmenu:updateItems() end
+                end,
+                separator = true,
+            },
+            {
                 text_func = function() return _("Sprawdź aktualizacje") .. "  (v" .. self:localVersion() .. ")" end,
                 keep_menu_open = true,
                 callback = function() self:checkForUpdate(false) end,
@@ -4999,6 +5066,7 @@ function ReadingOS:init()
 
     self:patchDofile()
     self:patchScreensaver()
+    self:startPresence(PRESENCE_FAST_SECONDS)
     self.wakeup_mgr = Device.wakeup_mgr
     if not self.wakeup_mgr then
         logger.info("ReadingOS: no WakeupMgr, sleep-screen refresh unavailable")
