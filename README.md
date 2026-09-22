@@ -27,12 +27,17 @@ a backend over HTTP; the backend is not part of this repo.
 
 ## Configuration
 
-Open **Tools → ReadingOS**. From there:
+**Tools → ReadingOS** opens the dashboard. Settings are on the dashboard
+under **WIĘCEJ → USTAWIENIA**:
 
-- **Otwórz pulpit** — opens the dashboard
 - **Serwer** — the backend base URL
 - **Token API** — set/replace the token in-device (alternative to the token
   file above)
+
+If the dashboard cannot open (no token yet, server unreachable and nothing
+cached), tapping ReadingOS opens these settings instead. Until WIĘCEJ →
+USTAWIENIA is confirmed on the PW3, the same list is also in the KOReader
+menu as **Tools → ReadingOS – ustawienia (awaryjnie)**.
 
 The plugin also self-updates: it checks the backend's plugin manifest once a
 day and offers an install when a newer `VERSION` is published, verifying each

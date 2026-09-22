@@ -73,6 +73,7 @@ local DEFAULTS = {
     readingos_ss_landscape = true,   -- three categories side by side need the width
     readingos_device_id = "",        -- generated once on first "Telefon" open, never regenerated
     readingos_craft_font = 0,        -- CraftView instruction size, -2..+2 steps around the default
+    readingos_craft_awake = 0,       -- last "nie gaś ekranu" choice in minutes, re-applied on open
 }
 
 local CACHE_FILE = DataStorage:getDataDir() .. "/cache/readingos.json"
@@ -2174,22 +2175,17 @@ function ReadingOS:openMore(dashboard)
     end)
 end
 
---- The KOReader ReadingOS submenu, opened as its own screen. Same
---- `sub_item_table` addToMainMenu registers under Narzędzia — built once,
---- shown here through KOReader's own TouchMenu so every toggle, spinner and
---- text editor behaves exactly as it does there.
+--- WIĘCEJ → USTAWIENIA: the settings list (settingsItems), shown through
+--- KOReader's own TouchMenu so every toggle, spinner and text editor behaves
+--- exactly as it does in KOReader's menu.
 function ReadingOS:openSettings()
     local ok, err = pcall(function()
         local TouchMenu = require("ui/widget/touchmenu")
-        local items = {}
-        self:addToMainMenu(items)
-        local entry = items.readingos
-        if not (entry and entry.sub_item_table) then error("no menu entry") end
         -- TouchMenu's tab_item_table[n] IS that tab's item list, carrying
         -- its own .text/.icon (readermenu.lua does the same with the
         -- registered tables).
-        local tab = entry.sub_item_table
-        tab.text = entry.text
+        local tab = self:settingsItems()
+        tab.text = _("ReadingOS")
         tab.icon = "appbar.settings"
         local container = CenterContainer:new {
             covers_header = true,
@@ -2212,7 +2208,7 @@ function ReadingOS:openSettings()
     if not ok then
         logger.warn("ReadingOS: openSettings failed:", err)
         UIManager:show(InfoMessage:new {
-            text = _("Ustawienia: Narzędzia → ReadingOS w menu KOReadera."),
+            text = _("Ustawienia: Narzędzia → ReadingOS – ustawienia (awaryjnie) w menu KOReadera."),
         })
     end
 end
@@ -2756,6 +2752,22 @@ local function oczka(n)
     return n .. " oczek"
 end
 
+-- Which side of the work a row is on — only when the row itself says so
+-- ("Row 3 (RS):", "RS: k all", "with wrong side facing"). Never inferred
+-- from row parity: flat, circular and turned work number rows differently,
+-- and a guessed side is worse than none. Both sides named → none shown.
+local function rowSide(r)
+    local function find(t)
+        t = " " .. tostring(t or "") .. " "
+        local rs = t:find("%f[%w]RS%f[%W]") or t:lower():find("right side", 1, true)
+        local ws = t:find("%f[%w]WS%f[%W]") or t:lower():find("wrong side", 1, true)
+        if rs and not ws then return "RS" end
+        if ws and not rs then return "WS" end
+        return nil
+    end
+    return find(r.label) or find(r.text)
+end
+
 local function rowFlag(r, name)
     for _i, f in ipairs(r.flags or {}) do if f == name then return true end end
     return false
@@ -2828,8 +2840,62 @@ function CraftView:showInfo()
     end
     if #parts == 0 then parts[1] = _("Brak przyborów i notatek w Craftsss dla tego wzoru.") end
     track("craft", "info", p.title)
+    -- One button per chart of the pattern, above KOReader's own close.
+    local buttons = {}
+    for _i, c in ipairs(type(p.charts) == "table" and p.charts or {}) do
+        buttons[#buttons + 1] = { {
+            text = "SCHEMAT" .. ((c.size or c.name) and (": " .. tostring(c.size or c.name)) or ""),
+            callback = function() self:showChart(c) end,
+        } }
+    end
     local TextViewer = require("ui/widget/textviewer")
-    UIManager:show(TextViewer:new { title = p.title or "", text = table.concat(parts, "\n") })
+    UIManager:show(TextViewer:new {
+        title = p.title or "", text = table.concat(parts, "\n"),
+        buttons_table = #buttons > 0 and buttons or nil,
+        add_default_buttons = #buttons > 0 or nil,
+    })
+    return true
+end
+
+local function craftChartFile(send_id, chart_id)
+    return DataStorage:getDataDir() .. "/cache/readingos-chart-" .. tostring(send_id) .. "-" .. tostring(chart_id) .. ".svg"
+end
+
+--- A chart of the pattern, full screen, with KOReader's own zoom and pan.
+--- Fetched once and kept in the cache, so it opens without Wi-Fi after that.
+--- Drawn by MuPDF, not NanoSVG: the chart's row numbers are <text>, which
+--- NanoSVG leaves out. Anything that fails says so and points to the QR.
+function CraftView:showChart(c)
+    local file = craftChartFile(self.send_id, c.id)
+    local body = request("GET", baseUrl() .. "/api/readingos/crafts/" .. tostring(self.send_id)
+        .. "/charts/" .. tostring(c.id) .. ".svg")
+    if body and body:find("<svg", 1, true) then
+        local tmp = file .. ".new"
+        local f = io.open(tmp, "w")
+        if f then f:write(body); f:close(); os.remove(file); os.rename(tmp, file) end
+    end
+    local bb
+    local cached = io.open(file, "r")
+    if cached then
+        cached:close()
+        local ok, res = pcall(function()
+            return require("ui/renderimage"):renderSVGImageFileWithMupdf(file, Screen:getWidth())
+        end)
+        if ok then bb = res else logger.warn("ReadingOS: chart render failed:", res) end
+    end
+    if not bb then
+        UIManager:show(InfoMessage:new {
+            text = _("Nie udało się pokazać schematu. Zeskanuj QR — schemat jest na stronie wzoru."),
+        })
+        return true
+    end
+    track("craft", "chart", tostring(c.id))
+    local ImageViewer = require("ui/widget/imageviewer")
+    UIManager:show(ImageViewer:new {
+        image = bb, image_disposable = true, -- the viewer frees the blitbuffer on close
+        title_text = c.name or c.size or _("Schemat"),
+        with_title_bar = true, fullscreen = true,
+    })
     return true
 end
 
@@ -2928,6 +2994,13 @@ function CraftView:build()
         end
         inner[#inner + 1] = LeftContainer:new { dimen = { w = iw, h = h_meta },
             TextWidget:new { text = title, face = faceFull(SIZE_META), fgcolor = Blitbuffer.COLOR_GRAY_5, max_width = iw } }
+        -- Knitting: the side you are looking at, in black, above the row.
+        local side = rowSide(cur)
+        if side then
+            inner[#inner + 1] = LeftContainer:new { dimen = { w = iw, h = h_meta },
+                TextWidget:new { text = side == "RS" and "PRAWA STRONA (RS)" or "LEWA STRONA (WS)",
+                    face = faceFull(SIZE_META), bold = true, max_width = iw } }
+        end
         inner[#inner + 1] = VerticalSpan:new { width = Screen:scaleBySize(6) }
         -- Long instructions wrap instead of being cut: a truncated round is a
         -- ruined round. `maxh` is only ever set as a last resort (see below).
@@ -3184,6 +3257,10 @@ function CraftView:askAwake()
     local function pick(minutes)
         return function()
             UIManager:close(dialog)
+            -- Remembered: the next pattern opens with the same choice, so a
+            -- forgotten tap never lets the screen sleep mid-round. "wyłącz"
+            -- is remembered too.
+            set("readingos_craft_awake", minutes)
             self:setAwake(minutes)
         end
     end
@@ -3325,10 +3402,15 @@ function ReadingOS:openPattern(id)
     end
     if #steps > 0 then data.rows, data.info_notes = steps, notes end
     track("craft", "open", from_cache and "cached" or data.title)
-    UIManager:show(CraftView:new {
+    local view = CraftView:new {
         plugin = self, pattern = data, send_id = id,
         stale = from_cache and math.floor((cache_age or 0) / 3600) or nil,
-    }, "full")
+    }
+    UIManager:show(view, "full")
+    -- The last "nie gaś ekranu" choice, again for this session. Still
+    -- bounded: it runs out after those minutes and on close, like a tap.
+    local awake = tonumber(get("readingos_craft_awake")) or 0
+    if awake > 0 then view:setAwake(awake) end
 end
 
 --- The manual. Generated server-side from the same constants the game runs on,
@@ -4603,7 +4685,7 @@ end
 function ReadingOS:showDashboard()
     if getToken() == "" then
         UIManager:show(InfoMessage:new {
-            text = _("Brak tokenu API. Wrzuć readingos-token.txt do folderu koreader albo ustaw go w Narzędzia → ReadingOS."),
+            text = _("Brak tokenu API. Wrzuć readingos-token.txt do folderu koreader albo ustaw go w ustawieniach, które otworzą się teraz."),
         })
         return false
     end
@@ -4727,28 +4809,35 @@ function ReadingOS:editText(key, title, touchmenu)
     dialog:onShowKeyboard()
 end
 
+--- Tapping ReadingOS in KOReader's menu opens the dashboard — the one thing
+--- it is opened for. Everything else lives on the dashboard: actions and
+--- screens under WIĘCEJ, and these settings under WIĘCEJ → USTAWIENIA. When
+--- the dashboard cannot open (no token yet, server down and no cache), the
+--- settings open instead, so the server address and token are never out of
+--- reach.
+---
+--- "ReadingOS – ustawienia (awaryjnie)" keeps KOReader's own menu path to the
+--- same settings until WIĘCEJ → USTAWIENIA has been confirmed on the PW3; it
+--- goes in the release after that.
 function ReadingOS:addToMainMenu(menu_items)
     menu_items.readingos = {
         text = _("ReadingOS"),
         sorting_hint = "tools",
-        sub_item_table = {
-            {
-                text = _("Otwórz pulpit"),
-                callback = function() self:showDashboard() end,
-            },
-            {
-                text = _("Zablokuj ekran"),
-                callback = function() self:showLockScreen() end,
-            },
-            {
-                text = _("Telefon"),
-                callback = function() self:showPhone() end,
-            },
-            {
-                text = _("Jak to działa"),
-                callback = function() self:showHelp() end,
-                separator = true,
-            },
+        callback = function()
+            if not self:showDashboard() then self:openSettings() end
+        end,
+    }
+    menu_items.readingos_settings = {
+        text = _("ReadingOS – ustawienia (awaryjnie)"),
+        sorting_hint = "tools",
+        sub_item_table = self:settingsItems(),
+    }
+end
+
+--- The settings list: one definition for WIĘCEJ → USTAWIENIA and the
+--- fallback menu entry.
+function ReadingOS:settingsItems()
+    return {
             {
                 text_func = function() return "Serwer: " .. get("readingos_url") end,
                 keep_menu_open = true,
@@ -4882,7 +4971,6 @@ function ReadingOS:addToMainMenu(menu_items)
                     UIManager:show(InfoMessage:new { text = msg })
                 end,
             },
-        },
     }
 end
 
