@@ -2229,7 +2229,7 @@ function ReadingOS:openMore(dashboard, start_tab)
     if not ok then
         logger.warn("ReadingOS: openMore failed:", err)
         UIManager:show(InfoMessage:new {
-            text = _("Ustawienia: Narzędzia → ReadingOS – ustawienia (awaryjnie) w menu KOReadera."),
+            text = _("WIĘCEJ nie chce się otworzyć: ") .. tostring(err),
         })
     end
 end
@@ -4771,9 +4771,8 @@ end
 --- settings open instead, so the server address and token are never out of
 --- reach.
 ---
---- "ReadingOS – ustawienia (awaryjnie)" keeps KOReader's own menu path to the
---- same settings until WIĘCEJ → USTAWIENIA has been confirmed on the PW3; it
---- goes in the release after that.
+--- The temporary "ReadingOS – ustawienia (awaryjnie)" entry was dropped in
+--- 2.7.1 after WIĘCEJ → USTAWIENIA was confirmed on the PW3 (2026-09-22).
 function ReadingOS:addToMainMenu(menu_items)
     menu_items.readingos = {
         text = _("ReadingOS"),
@@ -4782,15 +4781,9 @@ function ReadingOS:addToMainMenu(menu_items)
             if not self:showDashboard() then self:openSettings() end
         end,
     }
-    menu_items.readingos_settings = {
-        text = _("ReadingOS – ustawienia (awaryjnie)"),
-        sorting_hint = "tools",
-        sub_item_table = self:settingsItems(),
-    }
 end
 
---- The settings list: one definition for WIĘCEJ → USTAWIENIA and the
---- fallback menu entry.
+--- The settings list shown under WIĘCEJ → USTAWIENIA.
 function ReadingOS:settingsItems()
     return {
             {
