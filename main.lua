@@ -2767,36 +2767,9 @@ local function contextText(r)
     return head ~= "" and head or body
 end
 
--- Which two materials the pattern screen names: the hook or needles first,
--- then the yarn — matched on words only to choose and order them, never to
--- rewrite them. "needles" is plural on purpose: a yarn needle is not a tool
--- size. Nothing matched → the first two, as listed in Craftsss.
-local TOOL_WORDS = { "hook", "needles", "szydeł", "druty", "drutach" }
-local YARN_WORDS = { "yarn", "włóczk", "weight", "cotton", "wool", "merino", "acryl", "bawełn", "wełn" }
-local function mentions(m, words)
-    local t = string.lower((m.name or "") .. " " .. (m.detail or ""))
-    for _i, w in ipairs(words) do if t:find(w, 1, true) then return true end end
-    return false
-end
 local function materialText(m)
     return (m.detail and m.detail ~= "") and (m.name .. " · " .. m.detail) or (m.name or "")
 end
-local function craftToolLines(materials)
-    if type(materials) ~= "table" or #materials == 0 then return {} end
-    local tool, yarn
-    for _i, m in ipairs(materials) do
-        if not tool and mentions(m, TOOL_WORDS) then tool = m
-        elseif not yarn and mentions(m, YARN_WORDS) and not mentions(m, { "yarn needle" }) then yarn = m end
-    end
-    local out = {}
-    if tool then out[#out + 1] = materialText(tool) end
-    if yarn then out[#out + 1] = materialText(yarn) end
-    if #out == 0 then
-        for i = 1, math.min(2, #materials) do out[#out + 1] = materialText(materials[i]) end
-    end
-    return out
-end
-
 function CraftView:hasInfo()
     local p = self.pattern
     return (type(p.materials) == "table" and #p.materials > 0)
@@ -2935,16 +2908,19 @@ function CraftView:build()
     })
     gap(6)
 
-    -- What to work WITH: the hook or needles and the yarn, always on screen,
-    -- word for word from Craftsss. Two lines at most — the full list and the
-    -- pattern notes are one tap away (the › opens the info sheet).
-    local tools = craftToolLines(self.pattern.materials)
-    if #tools > 0 or self:hasInfo() then
-        if #tools == 0 then tools = { "notatki do wzoru" } end
-        for i, line in ipairs(tools) do
-            add(lrRow(cw, h_meta, line, i == 1 and "›" or "",
-                faceFull(SIZE_META), faceFull(SIZE_META), false), { kind = "info" })
-        end
+    -- What to work WITH, behind one row: KOReader's tools icon + PRZYBORY.
+    -- The tap opens the sheet, materials first, word for word from Craftsss
+    -- (Leo, 2026-09-22: out of the way until wanted, but obviously there).
+    -- A pattern with notes and no materials gets the info icon instead.
+    if self:hasInfo() then
+        local has_tools = type(self.pattern.materials) == "table" and #self.pattern.materials > 0
+        local igap = Screen:scaleBySize(10)
+        add(HorizontalGroup:new { align = "center",
+            icon(has_tools and "appbar.tools" or "info", h_meta),
+            HorizontalSpan:new { width = igap },
+            lrRow(cw - h_meta - igap, h_meta, has_tools and "PRZYBORY" or "NOTATKI DO WZORU", "›",
+                faceFull(SIZE_META), faceFull(SIZE_META), false),
+        }, { kind = "info" })
         gap(6)
     end
 
@@ -3176,7 +3152,13 @@ end
 --- offline resumes where the work actually stopped rather than where the
 --- server last heard about.
 function CraftView:commit(row, done)
-    local res = self.plugin:act("craft_row", row.id, { done = done })
+    -- Ticks journalled while the radio was down go first, oldest first, so
+    -- the newest intention for any row always lands last — and the server
+    -- (and the phone) catch up the moment the radio is back, not only on the
+    -- next open. A replay that fails means the radio is still down: journal
+    -- this tick too instead of waiting out a second timeout.
+    local _flushed, remaining = self.plugin:flushCraftTicks()
+    local res = remaining == 0 and self.plugin:act("craft_row", row.id, { done = done }) or nil
     if not (res and res.ok ~= false) then
         craftJournalAdd(row.id, done)
     end
