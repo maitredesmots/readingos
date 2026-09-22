@@ -2,8 +2,7 @@
     ReadingOS — a reading-first dashboard for KOReader.
 
     One screen answers "what should I know, do or continue right now": the book
-    on top, then only what falls inside the horizon (past due, today, tomorrow),
-    then The Dig — an idle world that grows out of real life.
+    on top, then only what falls inside the horizon (past due, today, tomorrow).
 
     Design rules this file has to keep. They are the whole point on e-ink, where
     there is no hover, no cursor and no colour:
@@ -480,7 +479,7 @@ local function flushTelemetry()
     local body = encode({ events = q })
     if not body then telemetrySave({}) return end
     -- Kept on failure, never dropped: a lost week of usage is a lost week of
-    -- evidence for tuning the game.
+    -- evidence for tuning the dashboard.
     if request("POST", baseUrl() .. "/api/readingos/telemetry", body) then
         telemetrySave({})
     end
@@ -889,9 +888,9 @@ end
 --- summary, three rows, chevron), then DOM / CO CZYTAM / ZAKUPY / CRAFTSSS
 --- as full-width bordered cards with an icon column (the current book's real
 --- cover for CO CZYTAM), then a six-item icon BOTTOM NAV pinned to the
---- bottom, ZAMKNIJ first (2026-09-18 redesign, reference mock). NAUKA/DIG/
+--- bottom, ZAMKNIJ first (2026-09-18 redesign, reference mock). NAUKA/
 --- Help/Notatki/Artykuły live in WIĘCEJ — the screens themselves (openScreen
---- "learn"/"dig"/"help") are untouched, only their entry point relocated.
+--- "learn"/"help") are untouched, only their entry point relocated.
 --- Rachunki/Notatki/Artykuły have no data source yet (Phase 1), so their
 --- bottom-nav/menu entries are a plain "soon" message — never a fake preview.
 ---
@@ -2192,7 +2191,6 @@ function ReadingOS:openMore(dashboard, start_tab)
                 text = _("Ekrany"), icon = "appbar.navigation",
                 item("CRAFTSSS", function() self:openScreen(dashboard, "crafts") end),
                 item("NAUKA", function() self:openScreen(dashboard, "learn") end),
-                item("DIG", function() self:openScreen(dashboard, "dig") end),
                 item("NOTATKI", function() self:openScreen(dashboard, "notes") end),
                 item("ARTYKUŁY", function() self:openScreen(dashboard, "articles") end),
             }
@@ -2364,9 +2362,6 @@ function ReadingOS:openScreen(dashboard, screen)
 
     elseif screen == "learn" then
         self:showCard(dashboard)
-
-    elseif screen == "dig" then
-        self:showDig(dashboard)
     end
 end
 
@@ -2600,51 +2595,6 @@ function ReadingOS:showCard(dashboard)
     end
     track("learn", "open")
     UIManager:show(LearnView:new { plugin = self, dashboard = dashboard, learn = learn, queue = queue })
-end
-
-function ReadingOS:showDig(dashboard)
-    local dig = (dashboard.data or {}).dig or {}
-    local lines = {
-        tostring(dig.stratum or "I · TOPSOIL"),
-        string.format("głębokość    %.1f m", dig.depth or 0),
-        string.format("dziś         +%.1f m  (%d XP)", dig.today_depth or 0, dig.today_xp or 0),
-        "",
-        string.format("światło      %.1f m", dig.lamplight or 0),
-        string.format("zapasy       %d dni", dig.supplies or 0),
-        string.format("narzędzia    %d", dig.tools or 0),
-        string.format("plotki       %d", dig.rumors or 0),
-        string.format("wiedza       %d", dig.knowledge or 0),
-        "",
-        string.format("kolekcja     %d / %d", dig.collected or 0, dig.collection_total or 42),
-    }
-    if dig.next then
-        if dig.next.revealed and dig.next.name then
-            lines[#lines + 1] = string.format("następne     %s na %.1f m", dig.next.name, dig.next.depth)
-        else
-            lines[#lines + 1] = string.format("następne     %.1f m", dig.next.depth)
-        end
-    else
-        lines[#lines + 1] = "skała macierzysta. niżej nic nie ma."
-    end
-    if dig.stall then
-        lines[#lines + 1] = ""
-        lines[#lines + 1] = dig.stall
-    end
-
-    local items = {}
-    for _i, l in ipairs(lines) do items[#items + 1] = { text = l, inert = true } end
-    items[#items + 1] = { text = "", inert = true }
-    items[#items + 1] = { text = _("KOLEKCJA  >"), collection = true }
-    items[#items + 1] = { text = _("CO TO WŁAŚCIWIE JEST?  >"), help = true }
-
-    self:showList("DIG", items, function(item, menu)
-        if item.collection then
-            self:showCollection()
-        elseif item.help then
-            UIManager:close(menu)
-            self:showHelp()
-        end
-    end)
 end
 
 -- ------------------------------------------------------------------ crafts
@@ -3449,7 +3399,7 @@ function ReadingOS:openPattern(id)
     if awake > 0 then view:setAwake(awake) end
 end
 
---- The manual. Generated server-side from the same constants the game runs on,
+--- The manual. Generated server-side from the same constants the code runs on,
 --- so it cannot drift out of date the way a hand-written help file would.
 function ReadingOS:showHelp()
     track("help", "open")
@@ -3470,51 +3420,6 @@ function ReadingOS:showHelp()
         end
     end
     self:showList("JAK TO DZIAŁA", items, nil)
-end
-
-function ReadingOS:showCollection()
-    local data = decode(request("GET", baseUrl() .. "/api/readingos/collection"))
-    if not data then
-        UIManager:show(InfoMessage:new { text = _("Offline — kolekcja jest na serwerze.") })
-        return
-    end
-    local cost = data.identify_cost or 2
-    local items = {}
-    for _i, s in ipairs(data.strata or {}) do
-        if s.unlocked then
-            items[#items + 1] = {
-                text = string.format("%s · %s      %d/%d", s.n, s.name, s.foundCount, s.total),
-                bold = true, inert = true,
-            }
-            for _j, slot in ipairs(s.slots or {}) do
-                local text, actionable
-                if not slot.found then
-                    text = string.format("   ?                    %.1f m", slot.depth)
-                    actionable = false
-                elseif slot.identified then
-                    text = "   " .. tostring(slot.name)
-                    actionable = false
-                else
-                    text = string.format("   [?] nierozpoznane      %d wiedzy", cost)
-                    actionable = true
-                end
-                items[#items + 1] = { text = text, slot = slot, inert = not actionable }
-            end
-        else
-            items[#items + 1] = { text = string.format("%s · --------        zamknięta", s.n), inert = true }
-        end
-    end
-    self:showList("KOLEKCJA", items, function(item, menu)
-        if not (item.slot and item.slot.found and not item.slot.identified) then return end
-        track("collection", "identify", item.slot.key)
-        local res = self:act("identify", item.slot.key)
-        if res and res.ok then
-            UIManager:close(menu)
-            self:showCollection()
-        else
-            UIManager:show(InfoMessage:new { text = _("Za mało wiedzy. Powtórz kilka fiszek.") })
-        end
-    end)
 end
 
 -- ------------------------------------------------------------- self-update
@@ -4540,7 +4445,7 @@ local function executeRemoteCommand(plugin, cmd)
     end
 
     if cmd == "next" or cmd == "prev" then
-        -- Only a real KOReader Menu (showList/showCollection) has page
+        -- Only a real KOReader Menu (showList) has page
         -- navigation. Dashboard/TaskDetail/LearnView/CraftView/LockView have
         -- no pagination or scroll of any kind — confirmed by reading this
         -- file, not assumed — so every other screen is unsupported_on_screen.
@@ -4774,9 +4679,8 @@ end
 
 -- ------------------------------------------------------ reading session time
 --
--- Minutes buy lamplight, and lamplight is the only hard gate in the game, so
--- this has to be honest. The clock runs from opening a book to closing or
--- suspending it — never from page turns, which would cost a radio wake each.
+-- Reading minutes are logged server-side, so this has to be honest. The clock
+-- runs from opening a book to closing or suspending it — never from page turns, which would cost a radio wake each.
 
 function ReadingOS:onReaderReady()
     self.session_start = os.time()
@@ -5030,10 +4934,9 @@ function ReadingOS:settingsItems()
                     if not data then
                         msg = "BŁĄD: " .. tostring(err or "?")
                     else
-                        local dg = data.dig or {}
-                        msg = string.format("OK%s\n%d zadań · %d dom · %.1f m głębokości",
+                        msg = string.format("OK%s\n%d zadań · %d dom",
                             age and " (z cache)" or "",
-                            #(data.tasks or {}), #(data.house or {}), dg.depth or 0)
+                            #(data.tasks or {}), #(data.house or {}))
                     end
                     UIManager:show(InfoMessage:new { text = msg })
                 end,

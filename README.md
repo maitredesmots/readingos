@@ -2,8 +2,7 @@
 
 A reading-first home screen for [KOReader](https://koreader.rocks/), built and
 tested on a Kindle Paperwhite 3. It shows the current book, what tasks are
-due today, and lets you act on a task without leaving the dashboard —
-plus The Dig, a small idle game that grows out of real activity.
+due today, and lets you act on a task without leaving the dashboard.
 
 This repo is the KOReader **plugin** only (`readingos.koplugin/`). It talks to
 a backend over HTTP; the backend is not part of this repo.
