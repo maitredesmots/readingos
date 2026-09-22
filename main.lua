@@ -2769,6 +2769,70 @@ local function contextText(r)
     return head ~= "" and head or body
 end
 
+-- Which two materials the pattern screen names: the hook or needles first,
+-- then the yarn — matched on words only to choose and order them, never to
+-- rewrite them. "needles" is plural on purpose: a yarn needle is not a tool
+-- size. Nothing matched → the first two, as listed in Craftsss.
+local TOOL_WORDS = { "hook", "needles", "szydeł", "druty", "drutach" }
+local YARN_WORDS = { "yarn", "włóczk", "weight", "cotton", "wool", "merino", "acryl", "bawełn", "wełn" }
+local function mentions(m, words)
+    local t = string.lower((m.name or "") .. " " .. (m.detail or ""))
+    for _i, w in ipairs(words) do if t:find(w, 1, true) then return true end end
+    return false
+end
+local function materialText(m)
+    return (m.detail and m.detail ~= "") and (m.name .. " · " .. m.detail) or (m.name or "")
+end
+local function craftToolLines(materials)
+    if type(materials) ~= "table" or #materials == 0 then return {} end
+    local tool, yarn
+    for _i, m in ipairs(materials) do
+        if not tool and mentions(m, TOOL_WORDS) then tool = m
+        elseif not yarn and mentions(m, YARN_WORDS) and not mentions(m, { "yarn needle" }) then yarn = m end
+    end
+    local out = {}
+    if tool then out[#out + 1] = materialText(tool) end
+    if yarn then out[#out + 1] = materialText(yarn) end
+    if #out == 0 then
+        for i = 1, math.min(2, #materials) do out[#out + 1] = materialText(materials[i]) end
+    end
+    return out
+end
+
+function CraftView:hasInfo()
+    local p = self.pattern
+    return (type(p.materials) == "table" and #p.materials > 0)
+        or (type(p.notes) == "string" and p.notes ~= "")
+        or (type(p.info_notes) == "table" and #p.info_notes > 0)
+end
+
+--- Everything about the pattern that is read, not worked: materials in
+--- full, the pattern's notes, and the note rows the sequence left out.
+--- KOReader's own TextViewer pages any length; closing it lands back on
+--- this view untouched — no fetch, no redraw of the rows.
+function CraftView:showInfo()
+    local p, parts = self.pattern, {}
+    if type(p.materials) == "table" and #p.materials > 0 then
+        parts[#parts + 1] = "PRZYBORY"
+        for _i, m in ipairs(p.materials) do parts[#parts + 1] = "• " .. materialText(m) end
+        parts[#parts + 1] = ""
+    end
+    if p.size then parts[#parts + 1] = "ROZMIAR: " .. tostring(p.size); parts[#parts + 1] = "" end
+    if type(p.notes) == "string" and p.notes ~= "" then
+        parts[#parts + 1] = "NOTATKI"; parts[#parts + 1] = p.notes; parts[#parts + 1] = ""
+    end
+    for _i, r in ipairs(p.info_notes or {}) do
+        parts[#parts + 1] = string.upper(r.label or "notatka")
+        parts[#parts + 1] = r.text or ""
+        parts[#parts + 1] = ""
+    end
+    if #parts == 0 then parts[1] = _("Brak przyborów i notatek w Craftsss dla tego wzoru.") end
+    track("craft", "info", p.title)
+    local TextViewer = require("ui/widget/textviewer")
+    UIManager:show(TextViewer:new { title = p.title or "", text = table.concat(parts, "\n") })
+    return true
+end
+
 function CraftView:build()
     local W, H = Screen:getWidth(), Screen:getHeight()
     local pad = Screen:scaleBySize(18)
@@ -2818,6 +2882,19 @@ function CraftView:build()
         margin_h = 0, margin_v = 0, bordersize = Screen:scaleBySize(1),
     })
     gap(6)
+
+    -- What to work WITH: the hook or needles and the yarn, always on screen,
+    -- word for word from Craftsss. Two lines at most — the full list and the
+    -- pattern notes are one tap away (the › opens the info sheet).
+    local tools = craftToolLines(self.pattern.materials)
+    if #tools > 0 or self:hasInfo() then
+        if #tools == 0 then tools = { "notatki do wzoru" } end
+        for i, line in ipairs(tools) do
+            add(lrRow(cw, h_meta, line, i == 1 and "›" or "",
+                faceFull(SIZE_META), faceFull(SIZE_META), false), { kind = "info" })
+        end
+        gap(6)
+    end
 
     -- where am I: the section and my place inside it
     if cur and cur.section then
@@ -3060,6 +3137,9 @@ function CraftView:onTap(_arg, ges)
     elseif t.kind == "qr" then
         return self:showQR()
 
+    elseif t.kind == "info" then
+        return self:showInfo()
+
     elseif t.kind == "goto" then
         self.cursor = t.index
         self:redraw()
@@ -3234,6 +3314,16 @@ function ReadingOS:openPattern(id)
         -- rows, and the label is then the only thing there is to show.
         if (r.text == nil or r.text == "") then r.text = r.label or "" end
     end
+    -- Note rows (sizes, gauge, "US terms") are read once, not worked: they
+    -- leave the sequence for the info sheet, so the cursor, the counts and
+    -- ZROBIONE only ever deal with rows you actually crochet. Kept on the
+    -- pattern as `info_notes`, so the copy CraftView re-saves to the cache
+    -- still has them offline. A pattern that is nothing but notes stays as sent.
+    local steps, notes = {}, data.info_notes or {}
+    for _i, r in ipairs(data.rows) do
+        if r.kind == "note" then notes[#notes + 1] = r else steps[#steps + 1] = r end
+    end
+    if #steps > 0 then data.rows, data.info_notes = steps, notes end
     track("craft", "open", from_cache and "cached" or data.title)
     UIManager:show(CraftView:new {
         plugin = self, pattern = data, send_id = id,
