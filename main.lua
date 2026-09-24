@@ -1897,7 +1897,15 @@ function TaskDetail:build()
         y = y + h
     end
 
-    add(lrRow(cw, h_meta, _("Zadanie"), "", faceFull(SIZE_META), faceFull(SIZE_META), true, true),
+    -- lrRow draws in exactly the height it is given, and a faceFull() line
+    -- is taller than any height derived from its size token (Font:getFace
+    -- scales again): the header spilled onto the rule under it (PW3,
+    -- 2026-09-24). So each lrRow here gets at least its text's real height.
+    local function fit(h, face)
+        return math.max(h, TextWidget:new { text = "Ąg", face = face }:getSize().h)
+    end
+
+    add(lrRow(cw, fit(h_meta, dashFace(SIZE_HEAD)), _("Zadanie"), "", dashFace(SIZE_HEAD), dashFace(SIZE_HEAD), true, true),
         h_meta, { kind = "back" })
     add(rule(cw), Screen:scaleBySize(2))
     gap(8)
@@ -1949,7 +1957,7 @@ function TaskDetail:build()
         if d.description and d.description ~= "" then
             local preview = d.description:sub(1, 90)
             if #d.description > 90 then preview = preview .. "…" end
-            add(lrRow(cw, h_row, _("Opis"), preview, faceFull(SIZE_ROW), faceFull(SIZE_META), true),
+            add(lrRow(cw, fit(h_row, faceFull(SIZE_ROW)), _("Opis"), preview, faceFull(SIZE_ROW), faceFull(SIZE_META), true),
                 h_row, { kind = "opis" })
             gap(8)
             add(rule(cw, true), Screen:scaleBySize(1))
@@ -1961,13 +1969,23 @@ function TaskDetail:build()
         if #d.subtasks > 0 then
             local doneN = 0
             for _i, s in ipairs(d.subtasks) do if s.done then doneN = doneN + 1 end end
-            add(lrRow(cw, h_meta, string.upper(_("Subtaski")), string.format("%d/%d", doneN, #d.subtasks),
-                faceFull(SIZE_HEAD), faceFull(SIZE_HEAD), true), h_meta)
+            add(lrRow(cw, fit(h_meta, dashFace(SIZE_HEAD)), string.upper(_("Subtaski")), string.format("%d/%d", doneN, #d.subtasks),
+                dashFace(SIZE_HEAD), dashFace(SIZE_HEAD), true), h_meta)
             gap(4)
-            -- ponytail: many subtasks + a long opis preview can push the action
-            -- stack below the fold — this screen does not scroll. Raise if a real
-            -- task ever has more than a handful.
-            for _i, s in ipairs(d.subtasks) do
+            -- This screen does not scroll, so the list stops where the action
+            -- buttons would start leaving the screen, and says how many it left
+            -- out — the full checklist is in tasksss. Budget: the buttons below
+            -- (each h_row + frame + gap), the closing rule, one "więcej" line.
+            local n_actions = self:repeats() and 4 or 2
+            local action_h = h_row + 2 * Screen:scaleBySize(9) + Screen:scaleBySize(8)
+            local line_h = fit(0, faceFull(SIZE_ROW))
+            local budget = H - pad - n_actions * action_h - Screen:scaleBySize(20) - line_h
+            for i, s in ipairs(d.subtasks) do
+                if y + line_h > budget and i < #d.subtasks then
+                    add(TextWidget:new { text = string.format("… i %d więcej w tasksss", #d.subtasks - i + 1),
+                        face = faceFull(SIZE_META), max_width = cw }, h_meta)
+                    break
+                end
                 add(TextWidget:new {
                     text = (s.done and "\u{2611}  " or "\u{2610}  ") .. s.label,
                     face = faceFull(SIZE_ROW), max_width = cw,
@@ -5511,6 +5529,7 @@ end
 -- one piece of layout arithmetic here that can silently push ZAMKNIJ off the
 -- bottom of a screen that cannot scroll, so it gets a check.
 ReadingOS._Dashboard = Dashboard
+ReadingOS._TaskDetail = TaskDetail
 ReadingOS._TasksView = TasksView
 ReadingOS._taskView = taskView -- test_tasks_view.lua
 ReadingOS._taskCount = taskCount
