@@ -775,6 +775,15 @@ local function batteryIcon(fraction, h)
     }
 end
 
+-- Front light: PW3 has 25 levels (0–24), so one tap moves two — twelve taps
+-- end to end, and 0 reads "wył" the way the light actually is.
+local LIGHT_STEP = 2
+local function lightLabel(level) return level == 0 and "wył" or tostring(level) end
+
+-- Most task rows the dashboard previews; the server sends the same number
+-- (PREVIEW_ROWS in hooome), and the layout drops rows until the card fits.
+local PREVIEW_MAX = 8
+
 --[[ The dashboard.
 
      Rows register their screen-space y range as they are laid out, so a tap is
@@ -884,20 +893,17 @@ end
 
 --- HEADER (one bordered strip: clock | date | weather | Wi-Fi icon + SSID +
 --- dot | version | battery — vertical rules between, the SSID the only part
---- that may truncate), then ZADANIA as one bordered card (attention row,
---- summary, three rows, chevron), then DOM / CO CZYTAM / ZAKUPY / CRAFTSSS
---- as full-width bordered cards with an icon column (the current book's real
---- cover for CO CZYTAM), then a six-item icon BOTTOM NAV pinned to the
---- bottom, ZAMKNIJ first (2026-09-18 redesign, reference mock). NAUKA/
---- Help/Notatki/Artykuły live in WIĘCEJ — the screens themselves (openScreen
---- "learn"/"help") are untouched, only their entry point relocated.
---- Rachunki/Notatki/Artykuły have no data source yet (Phase 1), so their
---- bottom-nav/menu entries are a plain "soon" message — never a fake preview.
+--- that may truncate), then CO CZYTAM (the book's real cover) with the front
+--- light box beside it, the same height, then ZADANIA as one full-width
+--- preview card that opens the full task view, then a five-item icon BOTTOM
+--- NAV pinned to the bottom: ZAMKNIJ, ZAKUPY and DOM with count badges,
+--- CRAFTSSS, WIĘCEJ (2026-09-24, leo). DOM/ZAKUPY/CRAFTSSS are nav keys, not
+--- cards; RACHUNKI, NAUKA, Notatki and Artykuły live in WIĘCEJ.
 ---
---- The screen never scrolls, so the cards are laid out against a measured
---- budget (everything above them + the pinned nav) and, when a busy day does
---- not fit, re-laid with fewer preview lines — content cards first, task
---- rows last. One line of everything always fits, so the nav always does.
+--- The screen never scrolls, so ZADANIA is laid out against a measured
+--- budget (everything above it + the pinned nav) and, when a busy day does
+--- not fit, re-laid with fewer preview rows. One row always fits, so the
+--- nav always does.
 function Dashboard:build()
     local W, H = Screen:getWidth(), Screen:getHeight()
     local pad = Screen:scaleBySize(18)
@@ -1137,11 +1143,11 @@ function Dashboard:build()
 
     local chev = Screen:scaleBySize(18)
     local f_head = dashFace(SIZE_HEAD)
-    local ico = Screen:scaleBySize(34)
     local ico_col = Screen:scaleBySize(56)
     local chev_col = chev + Screen:scaleBySize(6)
-    local text_w = iw - ico_col - chev_col
 
+    -- ▲ counts tasks only. What is missing at home is the DOM key's badge now,
+    -- so the same fact is never on screen twice.
     local overdue, out = 0, 0
     for _i, t in ipairs(d.tasks or {}) do if t.sym == "▲" then overdue = overdue + 1 end end
     for _i, hh in ipairs(d.house or {}) do if hh.state == "out" then out = out + 1 end end
@@ -1155,19 +1161,14 @@ function Dashboard:build()
     local summary = table.concat(tparts, " · ")
     if summary == "" and totals.tasks and totals.tasks > 0 then summary = tostring(totals.tasks) end
     local tasks = d.preview_tasks or d.tasks or {}
-    local house = d.house or {}
-    local crafts = d.crafts or {}
-    local shopping = d.shopping or { total = 0, preview = {} }
-    local shop_items = {}
-    for _i, name in ipairs(shopping.preview or {}) do
-        shop_items[#shop_items + 1] = { sym = "·", text = name }
-    end
+    local shopping = d.shopping or { total = 0 }
 
     -- CO CZYTAM's lead column: the book's real cover where the other cards
     -- have an icon. No cover on this device (not in the cover browser's
     -- cache, no open document) → KOReader's own book icon, same column,
-    -- nothing broken. Built once, outside the re-layout loop: an ImageWidget
-    -- scales its BlitBuffer on first measure, and that work is not repeated.
+    -- nothing broken. Built once: an ImageWidget scales its BlitBuffer on
+    -- first measure, and that work is not repeated.
+    local ico = Screen:scaleBySize(34)
     local book = self.plugin:currentBook(d)
     local cover_w, cover_h = Screen:scaleBySize(60), Screen:scaleBySize(82)
     local ok_cov, cover_bb = pcall(function() return self.plugin:bookCover(book.title) end)
@@ -1191,48 +1192,101 @@ function Dashboard:build()
         end
         return g
     end
-    --- icon column | body | chevron, the body as tall as it needs to be and
-    --- the icon centred beside it. `lead` is the icon column's widget
-    --- (an icon, or the book cover) and sets the column's width.
-    local function addContentCard(lead_widget, lead_width, body, target)
-        local body_h = math.max(size(lead_widget).h, size(body).h)
-        local row = OverlapGroup:new { dimen = Geom:new { w = iw, h = body_h } }
-        table.insert(row, LeftContainer:new { dimen = Geom:new { w = iw, h = body_h },
-            HorizontalGroup:new {
-                CenterContainer:new { dimen = Geom:new { w = lead_width, h = body_h }, lead_widget },
-                body,
-            } })
-        table.insert(row, RightContainer:new { dimen = Geom:new { w = iw, h = body_h },
-            icon("chevron.right", chev) })
-        addCard({ { widget = row } }, target)
-        gap(10)
-    end
-    local function lines(items, quiet_text, width, max_lines)
-        local g = VerticalGroup:new { align = "left" }
-        if #items == 0 then
-            table.insert(g, text(quiet_text, dashFace(SIZE_ROW), { max_width = width }))
-        else
-            for i = 1, math.min(max_lines, #items) do
-                table.insert(g, text(rowText(items[i]), dashFace(SIZE_ROW), { max_width = width }))
+
+    -- ---- CO CZYTAM + the light switch beside it (leo, 2026-09-24): its own
+    -- box outside the book card, exactly as tall as the card. The card is
+    -- given a floor of two fingertip buttons plus the level line, so when the
+    -- book is short it is the card that grows — never the buttons that shrink.
+    -- A device without a front light gets the full-width card and no box.
+    local light = self.plugin:lightLevel()
+    local light_w = light and Screen:scaleBySize(44) or 0
+    local light_gap = light and Screen:scaleBySize(8) or 0
+    local book_cw = cw - light_w - light_gap
+    local book_iw = book_cw - 2 * (bord + card_pad)
+    local light_mid = h_meta
+    local light_min = light and (2 * MIN_TAP + light_mid + 4 * bord) or 0
+    do
+        local bw = book_iw - lead_w - chev_col
+        local content = VerticalGroup:new { align = "left",
+            text(book.title, dashFace(SIZE_ROW), { max_width = bw }) }
+        if book.author ~= "" or book.percent ~= "" then
+            local meta = HorizontalGroup:new {}
+            if book.author ~= "" then
+                table.insert(meta, text(book.author, dashFace(SIZE_META), { gray = true, max_width = math.floor(bw * 0.7) }))
+                table.insert(meta, HorizontalSpan:new { width = Screen:scaleBySize(14) })
             end
+            if book.percent ~= "" then table.insert(meta, text(book.percent, dashFace(SIZE_META))) end
+            table.insert(content, meta)
         end
-        return g
-    end
-    local function body(label, count, content)
-        return VerticalGroup:new { align = "left",
-            cardTitle(label, count),
+        table.insert(content, VerticalSpan:new { width = Screen:scaleBySize(6) })
+        table.insert(content, ProgressWidget:new {
+            width = bw, height = Screen:scaleBySize(5), percentage = book.fraction or 0,
+            margin_h = 0, margin_v = 0, bordersize = bord, radius = Screen:scaleBySize(2),
+            fillcolor = Blitbuffer.COLOR_BLACK,
+        })
+        local body = VerticalGroup:new { align = "left",
+            cardTitle("CO CZYTAM"),
             VerticalSpan:new { width = Screen:scaleBySize(2) },
             content,
         }
+        local body_h = math.max(size(lead).h, size(body).h, light_min - 2 * (bord + card_pad))
+        local inner = OverlapGroup:new { dimen = Geom:new { w = book_iw, h = body_h } }
+        table.insert(inner, LeftContainer:new { dimen = Geom:new { w = book_iw, h = body_h },
+            HorizontalGroup:new {
+                CenterContainer:new { dimen = Geom:new { w = lead_w, h = body_h }, lead },
+                body,
+            } })
+        table.insert(inner, RightContainer:new { dimen = Geom:new { w = book_iw, h = body_h },
+            icon("chevron.right", chev) })
+        local book_frame = FrameContainer:new { bordersize = bord, padding = card_pad, width = book_cw, radius = 0, inner }
+        local book_h = size(book_frame).h
+        local top = y
+        local book_row = HorizontalGroup:new { align = "top", book_frame }
+        if light then
+            local lw_in = light_w - 2 * bord
+            local btn_h = math.floor((book_h - 2 * bord - light_mid - 2 * bord) / 2)
+            local btn2_h = book_h - 2 * bord - light_mid - 2 * bord - btn_h
+            local function lightButton(sign, h)
+                return CenterContainer:new { dimen = Geom:new { w = lw_in, h = h },
+                    text(sign, dashFace(SIZE_TITLE), { bold = true }) }
+            end
+            -- Kept on the widget: a tap swaps this one text and refreshes the
+            -- box alone, so stepping the light never flashes the whole panel.
+            self.light_text = text(lightLabel(light), dashFace(SIZE_META), { bold = true })
+            self.light_group = HorizontalGroup:new { align = "center",
+                icon("sun", Screen:scaleBySize(12)),
+                HorizontalSpan:new { width = Screen:scaleBySize(2) },
+                self.light_text,
+            }
+            local light_frame = FrameContainer:new { bordersize = bord, padding = 0, radius = 0,
+                VerticalGroup:new { align = "center",
+                    lightButton("+", btn_h),
+                    hline(lw_in),
+                    CenterContainer:new { dimen = Geom:new { w = lw_in, h = light_mid }, self.light_group },
+                    hline(lw_in),
+                    lightButton("−", btn2_h),
+                } }
+            table.insert(book_row, HorizontalSpan:new { width = light_gap })
+            table.insert(book_row, light_frame)
+            local lx1, lx2 = pad + book_cw + light_gap, pad + cw
+            self.light_region = Geom:new { x = lx1, y = top, w = light_w, h = book_h }
+            self.hit[#self.hit + 1] = { kind = "light", delta = LIGHT_STEP, label = "light_up",
+                x1 = lx1, x2 = lx2, y1 = top + bord, y2 = top + bord + btn_h }
+            local down_y = top + bord + btn_h + bord + light_mid + bord
+            self.hit[#self.hit + 1] = { kind = "light", delta = -LIGHT_STEP, label = "light_down",
+                x1 = lx1, x2 = lx2, y1 = down_y, y2 = down_y + btn2_h }
+        end
+        add(book_row, book_h)
+        self.hit[#self.hit + 1] = { kind = "continue", label = "continue",
+            x1 = pad, x2 = pad + book_cw, y1 = top, y2 = top + book_h }
+        gap(10)
     end
 
-    --- Everything between the header block and the nav, at a given density.
-    local function layoutCards(max_tasks, max_lines)
-        -- ZADANIA card: attention row (only when something is genuinely
-        -- late), the horizon summary, then the rows — one border around
-        -- all of it. The chevron sits on the top row, whichever that is.
-        -- The card itself is a target too, so a tap on its padding still
-        -- opens the list; rows are registered first and win.
+    --- ZADANIA, at a given number of preview rows. A preview and nothing
+    --- else (leo, 2026-09-24): the rows are not targets, the whole card is,
+    --- and it opens the full view with its filters. Acting on a task happens
+    --- there, one screen deeper — never on the glance screen.
+    local function layoutTasks(max_tasks)
         local task_items = {}
         local chevron_used = false
         local function chevron()
@@ -1240,13 +1294,9 @@ function Dashboard:build()
             chevron_used = true
             return icon("chevron.right", chev)
         end
-        if overdue > 0 or out > 0 then
-            local parts = {}
-            if overdue > 0 then parts[#parts + 1] = overdue .. " PO TERMINIE" end
-            if out > 0 then parts[#parts + 1] = out .. " BRAK" end
+        if overdue > 0 then
             task_items[#task_items + 1] = {
-                widget = cardRow(h_row, text("▲  " .. table.concat(parts, " · "), f_head, { bold = true, max_width = iw - chev - hdr_gap }), chevron()),
-                target = { screen = overdue > 0 and "tasks" or "house", label = "attention" },
+                widget = cardRow(h_row, text("▲  " .. overdue .. " PO TERMINIE", f_head, { bold = true, max_width = iw - chev - hdr_gap }), chevron()),
             }
             task_items[#task_items + 1] = { widget = hline(iw) }
         end
@@ -1255,10 +1305,7 @@ function Dashboard:build()
             table.insert(summary_widget, HorizontalSpan:new { width = Screen:scaleBySize(14) })
             table.insert(summary_widget, text(summary, f_head, { max_width = iw - chev - Screen:scaleBySize(90) }))
         end
-        task_items[#task_items + 1] = {
-            widget = cardRow(h_row, summary_widget, chevron()),
-            target = { screen = "tasks", label = "tasks" },
-        }
+        task_items[#task_items + 1] = { widget = cardRow(h_row, summary_widget, chevron()) }
         if #tasks == 0 then
             task_items[#task_items + 1] = { widget = cardRow(h_row, text("nic na mnie", dashFace(SIZE_META), { gray = true })) }
         else
@@ -1267,75 +1314,32 @@ function Dashboard:build()
                 local it = tasks[i]
                 task_items[#task_items + 1] = {
                     widget = lrRow(iw, h_row, rowText(it), it.meta, dashFace(SIZE_ROW), dashFace(SIZE_META), false),
-                    target = { kind = it.kind, id = it.id, screen = "tasks", label = it.text, row = it },
                 }
             end
         end
         addCard(task_items, { screen = "tasks", label = "tasks-card" })
-        gap(10)
-
-        -- section cards. DOM / CO CZYTAM / ZAKUPY / CRAFTSSS: icon column,
-        -- title + count, lines, chevron — one border each, one under the other.
-        addContentCard(icon("home", ico), ico_col,
-            body("DOM", totals.house and totals.house > 0 and tostring(totals.house) or nil,
-                lines(house, "wszystko jest ogarnięte", text_w, max_lines)),
-            { screen = "house", label = "house" })
-
-        do
-            local bw = iw - lead_w - chev_col
-            local content = VerticalGroup:new { align = "left",
-                text(book.title, dashFace(SIZE_ROW), { max_width = bw }) }
-            if book.author ~= "" or book.percent ~= "" then
-                local meta = HorizontalGroup:new {}
-                if book.author ~= "" then
-                    table.insert(meta, text(book.author, dashFace(SIZE_META), { gray = true, max_width = math.floor(bw * 0.7) }))
-                    table.insert(meta, HorizontalSpan:new { width = Screen:scaleBySize(14) })
-                end
-                if book.percent ~= "" then table.insert(meta, text(book.percent, dashFace(SIZE_META))) end
-                table.insert(content, meta)
-            end
-            table.insert(content, VerticalSpan:new { width = Screen:scaleBySize(6) })
-            table.insert(content, ProgressWidget:new {
-                width = bw, height = Screen:scaleBySize(5), percentage = book.fraction or 0,
-                margin_h = 0, margin_v = 0, bordersize = bord, radius = Screen:scaleBySize(2),
-                fillcolor = Blitbuffer.COLOR_BLACK,
-            })
-            addContentCard(lead, lead_w, body("CO CZYTAM", nil, content), { kind = "continue", label = "continue" })
-        end
-
-        addContentCard(icon("cart", ico), ico_col,
-            body("ZAKUPY", (shopping.total or 0) > 0 and tostring(shopping.total) or nil,
-                lines(shop_items, "lista pusta", text_w, max_lines)),
-            { screen = "shopping", label = "shopping" })
-
-        addContentCard(icon("yarn", ico), ico_col,
-            body("CRAFTSSS", #crafts > 0 and tostring(#crafts) or nil,
-                lines(crafts, "nic w budowie", text_w, max_lines)),
-            { screen = "crafts", label = "crafts" })
 
         -- footer: staleness / one rotating hint, inert, glance-only.
         if foot ~= "" then
+            gap(10)
             local ft = text(foot, dashFace(SIZE_META), { gray = true })
             local fh = size(ft, h_meta).h
             add(CenterContainer:new { dimen = Geom:new { w = cw, h = fh }, ft }, fh)
         end
     end
 
-    -- Densest first; each retry drops preview lines, content cards before
-    -- task rows. The last attempt (one line of everything) always fits.
-    local attempts = { { 3, 3 }, { 3, 2 }, { 3, 1 }, { 2, 1 }, { 1, 1 } }
-    for i, a in ipairs(attempts) do
+    -- As many preview rows as fit (the server sends up to eight), fewest one.
+    for n = PREVIEW_MAX, 1, -1 do
         local rows_n, hit_n, y0 = #rows, #self.hit, y
-        layoutCards(a[1], a[2])
-        if y <= limit or i == #attempts then break end
+        layoutTasks(n)
+        if y <= limit or n == 1 then break end
         for k = #rows, rows_n + 1, -1 do rows[k] = nil end
         for k = #self.hit, hit_n + 1, -1 do self.hit[k] = nil end
         y = y0
     end
 
-    -- ---- bottom nav: six equal icon+label targets pinned to the very bottom
-    -- of the screen, ZAMKNIJ first — the one way out of the whole screen, and
-    -- now a full-height tile rather than a small glyph in the corner. The
+    -- ---- bottom nav: five equal icon+label targets pinned to the very bottom
+    -- of the screen, ZAMKNIJ first — the one way out of the whole screen. The
     -- spacer below is computed from `y`, the REAL running offset every add()
     -- above already measured via getSize() — never an assumed content height.
     local spacer = limit - y
@@ -1344,13 +1348,33 @@ function Dashboard:build()
         y = y + spacer
     end
 
+    --- A nav icon with a count on it: a black pill with white digits, laid
+    --- over the icon's top-right corner. The box is exactly the icon's height
+    --- (the pill is shorter than the icon), so a badge can never move the nav
+    --- or its tap targets. No count → the bare icon, never a "0".
+    local function badged(name, count)
+        local ic = icon(name, nav_ico)
+        if not count or count <= 0 then return ic end
+        local badge = FrameContainer:new {
+            bordersize = 0, margin = 0, padding = 0,
+            padding_left = Screen:scaleBySize(4), padding_right = Screen:scaleBySize(4),
+            radius = Screen:scaleBySize(8), background = Blitbuffer.COLOR_BLACK,
+            TextWidget:new { text = count > 99 and "99+" or tostring(count), face = dashFace(SIZE_LABEL),
+                bold = true, fgcolor = Blitbuffer.COLOR_WHITE },
+        }
+        local bw = size(badge).w
+        local shift = math.floor(bw / 2)
+        ic.overlap_offset = { shift, 0 }
+        badge.overlap_offset = { nav_ico + shift - math.floor(bw / 2), 0 }
+        return OverlapGroup:new { dimen = Geom:new { w = nav_ico + bw, h = nav_ico }, ic, badge }
+    end
+
     add(rule(cw), nav_rule)
     local nav_items = {
         { icon = "close", label = "ZAMKNIJ", target = { kind = "close", label = "close" } },
-        { icon = "tasks", label = "ZADANIA", target = { screen = "tasks", label = "tasks" } },
-        { icon = "home", label = "DOM", target = { screen = "house", label = "house" } },
-        { icon = "cart", label = "ZAKUPY", target = { screen = "shopping", label = "shopping" } },
-        { icon = "wallet", label = "RACHUNKI", target = { screen = "bills", label = "bills" } },
+        { icon = "cart", label = "ZAKUPY", count = shopping.total, target = { screen = "shopping", label = "shopping" } },
+        { icon = "yarn", label = "CRAFTSSS", target = { screen = "crafts", label = "crafts" } },
+        { icon = "home", label = "DOM", count = out, target = { screen = "house", label = "house" } },
         { icon = "more", label = "WIĘCEJ", target = { kind = "more", label = "more" } },
     }
     local seg_w = math.floor(cw / #nav_items)
@@ -1360,7 +1384,7 @@ function Dashboard:build()
         table.insert(nav_group, CenterContainer:new {
             dimen = Geom:new { w = seg_w - bord, h = nav_h },
             VerticalGroup:new { align = "center",
-                icon(it.icon, nav_ico),
+                badged(it.icon, tonumber(it.count)),
                 VerticalSpan:new { width = Screen:scaleBySize(4) },
                 text(it.label, dashFace(SIZE_LABEL), { max_width = seg_w - 2 * bord }),
             },
@@ -1552,6 +1576,42 @@ function ReadingOS:bookCover(title)
     end)
     if bb then self.cover_cache = { key = key, bb = bb } end
     return bb
+end
+
+--- Current front light level, or nil on a device without one (the dashboard
+--- then draws no light box at all).
+function ReadingOS:lightLevel()
+    local ok, level = pcall(function()
+        if not Device:hasFrontlight() then return nil end
+        return Device:getPowerDevice():frontlightIntensity()
+    end)
+    return ok and tonumber(level) or nil
+end
+
+--- Step the front light by `delta`, the way KOReader's own FrontLightWidget
+--- does it: reaching 0 turns the light off, any level above it turns it back
+--- on. Returns the level the hardware actually ended at, nil on failure.
+function ReadingOS:stepLight(delta)
+    local ok, level = pcall(function()
+        local powerd = Device:getPowerDevice()
+        local cur = powerd:frontlightIntensity()
+        local new = math.max(powerd.fl_min, math.min(powerd.fl_max, cur + delta))
+        if new == cur then return cur end
+        if new == powerd.fl_min then
+            powerd:turnOffFrontlight()
+        else
+            powerd:setIntensity(new)
+            if powerd:isFrontlightOff() then powerd:turnOnFrontlight() end
+        end
+        if powerd.updateResumeFrontlightState then powerd:updateResumeFrontlightState() end
+        return powerd:frontlightIntensity()
+    end)
+    if not ok then
+        logger.warn("ReadingOS: front light step failed:", level)
+        return nil
+    end
+    track("home", "light", tostring(level))
+    return level
 end
 
 --- Detail screens reuse KOReader's Menu: it already handles paging, tap
@@ -2081,6 +2141,475 @@ end
 --- ZADANIA list). Fetches detail synchronously, same blocking-call contract
 --- as every other network action in this file (checkForUpdate, restockMenu,
 --- taskAct) — a 5-15s socket timeout, never a silent hang.
+-- ------------------------------------------------------------- task view
+--
+-- The full ZADANIA screen (leo, 2026-09-24). The dashboard card is a
+-- preview; this is where the whole horizon is filtered, sorted and acted on.
+-- Filters apply on tap — filtering is local, so there is no slow page load
+-- an Apply button would batch. The "Teraz:" line always says which filters
+-- are on, and an option that would empty the list is drawn gray and ignores
+-- taps, so there are no dead ends. The choice is remembered between visits.
+
+-- group "*" is every group; "" is the tasks that have none.
+local TASK_FILTER_DEFAULT = { who = "mine", when = "all", group = "*", sort = "horizon" }
+local TASK_WHO = { { "mine", "MOJE", "moje" }, { "all", "WSZYSCY", "wszyscy" } }
+local TASK_WHEN = { { "all", "WSZYSTKO", "cały horyzont" }, { "past", "ZALEGŁE", "zaległe" },
+    { "today", "DZIŚ", "dziś" }, { "tmrw", "JUTRO", "jutro" } }
+local TASK_SORT = { { "horizon", "HORYZONT", "wg horyzontu" }, { "priority", "PRIORYTET", "wg priorytetu" },
+    { "time", "GODZINA", "wg godziny" }, { "az", "A–Z", "A–Z" } }
+local NO_GROUP = "(bez grupy)"
+
+local function copyFilter(f)
+    local g = {}
+    for k, v in pairs(f) do g[k] = v end
+    return g
+end
+
+--- The remembered filter, every key present and a string.
+local function taskFilter()
+    local saved = get("readingos_tasks_filter")
+    local f = copyFilter(TASK_FILTER_DEFAULT)
+    if type(saved) == "table" then
+        for k in pairs(TASK_FILTER_DEFAULT) do
+            if type(saved[k]) == "string" then f[k] = saved[k] end
+        end
+    end
+    return f
+end
+
+--- Does row `r` pass filter `f`? `skip` names one key to ignore, which is how
+--- an option counts what it WOULD show. A row from a server older than the
+--- `mine` field counts as mine: hiding everything would be the worse guess.
+local function taskPasses(r, f, skip)
+    if skip ~= "who" and f.who == "mine" and r.mine == false then return false end
+    if skip ~= "when" and f.when ~= "all" and r.bucket ~= f.when then return false end
+    if skip ~= "group" and f.group ~= "*" and (r.project or "") ~= f.group then return false end
+    return true
+end
+
+--- How many rows `f` would show with `key` set to `value`.
+local function taskCount(rows, f, key, value)
+    local g = copyFilter(f)
+    g[key] = value
+    local n = 0
+    for _i, r in ipairs(rows) do if taskPasses(r, g) then n = n + 1 end end
+    return n
+end
+
+--- Lower case for A–Z: KOReader's UTF-8 aware lowering, so "Łóżko" sorts
+--- with "łóżko"; plain :lower() where it is unavailable.
+local function lowerKey(s)
+    local ok, l = pcall(util.stringLower, s)
+    return (ok and l) or s:lower()
+end
+
+--- Rows passing `f`, in f.sort order. The server sends the horizon order, so
+--- every tie falls back on it and HORYZONT is simply "as sent".
+local function taskView(rows, f)
+    local picked = {}
+    for i, r in ipairs(rows) do
+        if taskPasses(r, f) then picked[#picked + 1] = { row = r, i = i } end
+    end
+    table.sort(picked, function(a, b)
+        local ra, rb = a.row, b.row
+        if f.sort == "priority" then
+            local pa, pb = tonumber(ra.priority) or 0, tonumber(rb.priority) or 0
+            if pa ~= pb then return pa > pb end
+        elseif f.sort == "time" then
+            local ta, tb = ra.time or "", rb.time or ""
+            if ta ~= tb then
+                if ta == "" then return false end
+                if tb == "" then return true end
+                return ta < tb
+            end
+        elseif f.sort == "az" then
+            local na, nb = lowerKey(ra.text or ""), lowerKey(rb.text or "")
+            if na ~= nb then return na < nb end
+        end
+        return a.i < b.i
+    end)
+    local out = {}
+    for k, e in ipairs(picked) do out[k] = e.row end
+    return out
+end
+
+--- Groups present in the rows the other filters leave, most tasks first.
+local function taskGroups(rows, f)
+    local counts, order = {}, {}
+    for _i, r in ipairs(rows) do
+        if taskPasses(r, f, "group") then
+            local g = r.project or ""
+            if not counts[g] then counts[g] = 0; order[#order + 1] = g end
+            counts[g] = counts[g] + 1
+        end
+    end
+    table.sort(order, function(a, b)
+        if counts[a] ~= counts[b] then return counts[a] > counts[b] end
+        return a < b
+    end)
+    local out = {}
+    for k, g in ipairs(order) do out[k] = { name = g, count = counts[g] } end
+    return out
+end
+
+local function optionWord(list, value, idx)
+    for _i, o in ipairs(list) do if o[1] == value then return o[idx] end end
+    return value
+end
+
+--- "moje · dziś · wszystkie grupy · wg horyzontu"
+local function taskFilterLine(f)
+    return table.concat({
+        optionWord(TASK_WHO, f.who, 3),
+        optionWord(TASK_WHEN, f.when, 3),
+        f.group == "*" and "wszystkie grupy" or (f.group == "" and NO_GROUP or f.group),
+        optionWord(TASK_SORT, f.sort, 3),
+    }, " · ")
+end
+
+local function isDefaultFilter(f)
+    for k, v in pairs(TASK_FILTER_DEFAULT) do if f[k] ~= v then return false end end
+    return true
+end
+
+local TasksView = InputContainer:extend {
+    plugin = nil,
+    dashboard = nil,
+    rows = nil,    -- the whole horizon, server order
+    total = nil,   -- how many exist, which is more than #rows when offline
+    offline = nil, -- rows are the dashboard's cached slice
+}
+
+function TasksView:init()
+    self.dimen = Geom:new { x = 0, y = 0, w = Screen:getWidth(), h = Screen:getHeight() }
+    self.covers_fullscreen = true
+    -- Phone Companion: a "menu" is what the remote pages with next/prev.
+    self.readingos_screen = "menu"
+    self.title = "ZADANIA"
+    self.filter = taskFilter()
+    self.page = 1
+    self.spent = {}
+    self.opened_at = os.time()
+    if Device:isTouchDevice() then
+        self.ges_events = {
+            Tap = { GestureRange:new { ges = "tap", range = self.dimen } },
+            Swipe = { GestureRange:new { ges = "swipe", range = self.dimen } },
+        }
+    end
+    if Device:hasKeys() then
+        self.key_events = { Close = { { Device.input.group.Back } } }
+    end
+    self[1] = self:build()
+end
+
+function TasksView:build()
+    self.hit = {}
+    local W, H = Screen:getWidth(), Screen:getHeight()
+    local pad = Screen:scaleBySize(18)
+    local cw = W - 2 * pad
+    local bord = Screen:scaleBySize(1)
+    local h_row = math.max(MIN_TAP, Screen:scaleBySize(SIZE_ROW * 2 * FONT_SCALE))
+    local chip_h = MIN_TAP
+    local chip_gap = Screen:scaleBySize(8)
+    local chip_pad = Screen:scaleBySize(10)
+    local lab_w = Screen:scaleBySize(70)
+    local f_row, f_meta, f_head = dashFace(SIZE_ROW), dashFace(SIZE_META), dashFace(SIZE_HEAD)
+    local gray = Blitbuffer.COLOR_GRAY_5
+    local f = self.filter
+    local shown = taskView(self.rows, f)
+    local out = {}
+    local y = pad
+
+    local function add(widget, target)
+        out[#out + 1] = widget
+        local h = widget:getSize().h
+        if target then
+            target.y1, target.y2 = y, y + h
+            self.hit[#self.hit + 1] = target
+        end
+        y = y + h
+    end
+    local function gap(px)
+        out[#out + 1] = VerticalSpan:new { width = px }
+        y = y + px
+    end
+
+    -- title: what, how many of how many, and the X every ReadingOS screen has.
+    local count_text = string.format("%d z %d", #shown, self.total or #self.rows)
+    add(lrRow(cw, h_row, "ZADANIA", count_text, f_head, f_meta, false, true), { kind = "close" })
+    add(rule(cw))
+    gap(Screen:scaleBySize(8))
+
+    --- A chip: black with white text when chosen, gray when it would show
+    --- nothing. Returns the widget and its width.
+    local function chip(label, selected, enabled, width)
+        local t = TextWidget:new { text = label, face = f_meta, bold = selected,
+            fgcolor = selected and Blitbuffer.COLOR_WHITE or (not enabled and gray or nil) }
+        local w = width or (t:getSize().w + 2 * chip_pad)
+        return FrameContainer:new { bordersize = bord, padding = 0, margin = 0, radius = 0,
+            background = selected and Blitbuffer.COLOR_BLACK or nil,
+            CenterContainer:new { dimen = Geom:new { w = w - 2 * bord, h = chip_h - 2 * bord }, t } }, w
+    end
+    local function label(s)
+        return LeftContainer:new { dimen = Geom:new { w = lab_w, h = chip_h },
+            TextWidget:new { text = s, face = f_meta, bold = true } }
+    end
+    --- One filter row of chips; each chip is its own target.
+    local function chipRow(name, key, options)
+        local row = HorizontalGroup:new { label(name) }
+        local x = pad + lab_w
+        local targets = {}
+        for i, o in ipairs(options) do
+            local selected = f[key] == o[1]
+            local enabled = selected or key == "sort" or taskCount(self.rows, f, key, o[1]) > 0
+            local w_chip, w = chip(o[2], selected, enabled)
+            if i > 1 then
+                table.insert(row, HorizontalSpan:new { width = chip_gap })
+                x = x + chip_gap
+            end
+            table.insert(row, w_chip)
+            if enabled and not selected then
+                targets[#targets + 1] = { kind = "filter", key = key, value = o[1], x1 = x, x2 = x + w }
+            end
+            x = x + w
+        end
+        local top = y
+        add(row)
+        for _i, t in ipairs(targets) do
+            t.y1, t.y2 = top, y
+            self.hit[#self.hit + 1] = t
+        end
+        gap(chip_gap)
+    end
+
+    chipRow("KTO", "who", TASK_WHO)
+    chipRow("KIEDY", "when", TASK_WHEN)
+    do
+        -- Eleven groups do not fit as chips, so GRUPA is one button that
+        -- opens the list of groups with their counts.
+        local name = f.group == "*" and "wszystkie" or (f.group == "" and NO_GROUP or f.group)
+        local w_chip = chip(name .. "  ›", f.group ~= "*", true, cw - lab_w)
+        local top = y
+        add(HorizontalGroup:new { label("GRUPA"), w_chip })
+        self.hit[#self.hit + 1] = { kind = "group_pick", x1 = pad + lab_w, x2 = pad + cw, y1 = top, y2 = y }
+        gap(chip_gap)
+    end
+    chipRow("SORT", "sort", TASK_SORT)
+
+    -- Teraz: the whole filter in words, and the one-tap way back to default.
+    local now = "Teraz: " .. taskFilterLine(f)
+    if self.offline then now = now .. " · offline" end
+    if isDefaultFilter(f) then
+        add(LeftContainer:new { dimen = Geom:new { w = cw, h = h_row },
+            TextWidget:new { text = now, face = f_meta, max_width = cw } })
+    else
+        local clear_w = select(2, chip("WYCZYŚĆ", false, true))
+        local line = OverlapGroup:new { dimen = Geom:new { w = cw, h = chip_h } }
+        table.insert(line, LeftContainer:new { dimen = Geom:new { w = cw, h = chip_h },
+            TextWidget:new { text = now, face = f_meta, max_width = cw - clear_w - chip_gap } })
+        table.insert(line, RightContainer:new { dimen = Geom:new { w = cw, h = chip_h },
+            (chip("WYCZYŚĆ", false, true)) })
+        local top = y
+        add(line)
+        self.hit[#self.hit + 1] = { kind = "clear", x1 = pad + cw - clear_w, x2 = pad + cw, y1 = top, y2 = y }
+    end
+    add(rule(cw))
+
+    -- the list, paged: bucket headers only where the order is the horizon's.
+    local entries = {}
+    local bucket
+    local BUCKETS = { past = "ZALEGŁE", today = "DZIŚ", tmrw = "JUTRO" }
+    for _i, r in ipairs(shown) do
+        if f.sort == "horizon" and r.bucket and r.bucket ~= bucket then
+            bucket = r.bucket
+            entries[#entries + 1] = { header = BUCKETS[bucket] or bucket }
+        end
+        entries[#entries + 1] = { row = r }
+    end
+    local pager_h = MIN_TAP
+    local per_page = math.max(1, math.floor((H - pad - pager_h - Screen:scaleBySize(4) - y) / h_row))
+    local pages, cur = {}, {}
+    for _i, e in ipairs(entries) do
+        if #cur == per_page then
+            -- a header never ends a page: it moves over with its first row
+            local carry = cur[#cur].header and table.remove(cur) or nil
+            pages[#pages + 1] = cur
+            cur = { carry }
+        end
+        cur[#cur + 1] = e
+    end
+    if #cur > 0 then pages[#pages + 1] = cur end
+    self.pages = #pages
+    self.page = math.max(1, math.min(self.page, #pages))
+
+    if #entries == 0 then
+        add(LeftContainer:new { dimen = Geom:new { w = cw, h = h_row },
+            TextWidget:new { text = "Nic tu nie ma przy tych filtrach.", face = f_row, max_width = cw } })
+    end
+    for _i, e in ipairs(pages[self.page] or {}) do
+        if e.header then
+            add(LeftContainer:new { dimen = Geom:new { w = cw, h = h_row },
+                TextWidget:new { text = e.header, face = f_meta, bold = true } })
+        elseif self.spent[e.row.id] then
+            add(LeftContainer:new { dimen = Geom:new { w = cw, h = h_row },
+                TextWidget:new { text = "✓  " .. rowText(e.row), face = f_row, fgcolor = gray, max_width = cw } })
+        else
+            -- why it is here, then what it is part of — the same right column
+            -- the old list had (project · owner · subtasks).
+            local right = e.row.meta or ""
+            if e.row.detail and e.row.detail ~= "" then right = right .. "  ·  " .. e.row.detail end
+            add(lrRow(cw, h_row, rowText(e.row), right, f_row, f_meta, false), { kind = "task", row = e.row })
+        end
+    end
+
+    -- pager, pinned to the bottom; absent when everything fits on one page.
+    if #pages > 1 then
+        local spacer = H - pad - pager_h - Screen:scaleBySize(4) - y
+        if spacer > 0 then gap(spacer) end
+        add(rule(cw))
+        local third = math.floor(cw / 3)
+        local function cell(s, enabled)
+            return CenterContainer:new { dimen = Geom:new { w = third, h = pager_h },
+                TextWidget:new { text = s, face = f_meta, bold = enabled, fgcolor = not enabled and gray or nil } }
+        end
+        local top = y
+        add(HorizontalGroup:new {
+            cell("‹  POPRZEDNIA", self.page > 1),
+            cell(string.format("%d / %d", self.page, #pages), false),
+            cell("NASTĘPNA  ›", self.page < #pages),
+        })
+        if self.page > 1 then
+            self.hit[#self.hit + 1] = { kind = "page", delta = -1, x1 = pad, x2 = pad + third, y1 = top, y2 = y }
+        end
+        if self.page < #pages then
+            self.hit[#self.hit + 1] = { kind = "page", delta = 1, x1 = pad + 2 * third, x2 = pad + cw, y1 = top, y2 = y }
+        end
+    end
+
+    return FrameContainer:new {
+        background = Blitbuffer.COLOR_WHITE, bordersize = 0, padding = pad,
+        width = W, height = H,
+        VerticalGroup:new { align = "left", unpack(out) },
+    }
+end
+
+function TasksView:redraw()
+    local old = self[1]
+    self[1] = nil
+    if old and old.free then pcall(function() old:free() end) end
+    self[1] = self:build()
+    UIManager:setDirty(self, "ui")
+end
+
+function TasksView:setFilter(f)
+    self.filter = f
+    self.page = 1
+    set("readingos_tasks_filter", f)
+    track("zadania", "filter", taskFilterLine(f))
+    self:redraw()
+end
+
+TasksView.targetAt = Dashboard.targetAt
+
+function TasksView:pickGroup()
+    local ButtonDialogTitle = require("ui/widget/buttondialogtitle")
+    local dialog
+    local function choose(g)
+        return function()
+            UIManager:close(dialog)
+            local f = copyFilter(self.filter)
+            f.group = g
+            self:setFilter(f)
+        end
+    end
+    local all = taskCount(self.rows, self.filter, "group", "*")
+    local buttons = { { { text = string.format("wszystkie  (%d)", all), callback = choose("*") } } }
+    for _i, g in ipairs(taskGroups(self.rows, self.filter)) do
+        buttons[#buttons + 1] = { { text = string.format("%s  (%d)", g.name == "" and NO_GROUP or g.name, g.count),
+            callback = choose(g.name) } }
+    end
+    dialog = ButtonDialogTitle:new { title = _("Grupa"), title_align = "center", buttons = buttons }
+    UIManager:show(dialog)
+end
+
+function TasksView:onTap(_arg, ges)
+    local t = self:targetAt(ges.pos.x, ges.pos.y)
+    if not t then return true end
+    if t.kind == "close" then return self:onClose() end
+    if t.kind == "filter" then
+        local f = copyFilter(self.filter)
+        f[t.key] = t.value
+        return self:setFilter(f)
+    end
+    if t.kind == "clear" then return self:setFilter(copyFilter(TASK_FILTER_DEFAULT)) end
+    if t.kind == "group_pick" then return self:pickGroup() end
+    if t.kind == "page" then return t.delta > 0 and self:onNextPage() or self:onPrevPage() end
+    if t.kind == "task" then
+        local row = t.row
+        self.plugin:openTaskDetail(self.dashboard, row, function()
+            self.spent[row.id] = true -- genuinely spent: grayed, no longer a target
+            self:redraw()
+        end)
+    end
+    return true
+end
+
+function TasksView:onSwipe(_arg, ges)
+    if ges.direction == "west" then return self:onNextPage() end
+    if ges.direction == "east" then
+        if self.page > 1 then return self:onPrevPage() end
+        return self:onClose()
+    end
+    return true
+end
+
+function TasksView:onNextPage()
+    if self.page < (self.pages or 1) then self.page = self.page + 1; self:redraw() end
+    return true
+end
+
+function TasksView:onPrevPage()
+    if self.page > 1 then self.page = self.page - 1; self:redraw() end
+    return true
+end
+
+function TasksView:onClose()
+    track("zadania", "back", nil, (os.time() - (self.opened_at or os.time())) * 1000)
+    UIManager:close(self)
+    return true
+end
+
+function TasksView:onCloseWidget()
+    UIManager:setDirty(nil, "full")
+end
+
+--- The whole horizon for the task view; nil when offline or on any failure,
+--- and the caller falls back on the dashboard's cached slice. No request at
+--- all without a connection: request() would block for its socket timeout.
+function ReadingOS:fetchTasks()
+    local ok_conn, connected = pcall(function() return NetworkMgr:isConnected() end)
+    if not (ok_conn and connected) then return nil end
+    local body, err = request("GET", baseUrl() .. "/api/readingos/tasks")
+    if not body then
+        logger.warn("ReadingOS: task list fetch failed:", err)
+        return nil
+    end
+    local data = decode(body)
+    if type(data) ~= "table" or type(data.rows) ~= "table" then return nil end
+    return data.rows
+end
+
+function ReadingOS:openTasksView(dashboard)
+    local d = (dashboard and dashboard.data) or {}
+    local rows = self:fetchTasks()
+    local offline = rows == nil
+    if offline then rows = d.tasks or {} end
+    local total = offline and ((d.totals or {}).tasks or #rows) or #rows
+    track("zadania", "open", offline and "offline" or nil)
+    UIManager:show(TasksView:new { plugin = self, dashboard = dashboard, rows = rows,
+        total = total, offline = offline }, "full")
+end
+
 function ReadingOS:openTaskDetail(dashboard, row, after)
     track("task", "open_detail", tostring(row.id))
     local detail, reason = self:fetchTaskDetail(row.id)
@@ -2104,6 +2633,19 @@ function ReadingOS:handle(dashboard, target, is_hold)
 
     if target.kind == "close" then
         return dashboard:onClose()
+    end
+
+    -- Only the light box repaints: the level text is swapped in place and
+    -- its region refreshed, so twelve taps never flash the whole panel.
+    if target.kind == "light" then
+        local level = self:stepLight(target.delta)
+        if level and dashboard.light_text then
+            dashboard.light_text:setText(lightLabel(level))
+            -- the group caches its width; "wył" and "12" differ
+            if dashboard.light_group.resetLayout then dashboard.light_group:resetLayout() end
+            UIManager:setDirty(dashboard, "ui", dashboard.light_region)
+        end
+        return
     end
 
     if target.kind == "update" then
@@ -2189,6 +2731,7 @@ function ReadingOS:openMore(dashboard, start_tab)
             }
             tabs[#tabs + 1] = {
                 text = _("Ekrany"), icon = "appbar.navigation",
+                item("RACHUNKI", function() self:openScreen(dashboard, "bills") end),
                 item("CRAFTSSS", function() self:openScreen(dashboard, "crafts") end),
                 item("NAUKA", function() self:openScreen(dashboard, "learn") end),
                 item("NOTATKI", function() self:openScreen(dashboard, "notes") end),
@@ -2246,8 +2789,11 @@ function ReadingOS:openScreen(dashboard, screen)
     if screen == "help" then
         return self:showHelp()
 
-    elseif screen == "tasks" or screen == "house" then
-        local src = screen == "tasks" and (d.tasks or {}) or (d.house or {})
+    elseif screen == "tasks" then
+        return self:openTasksView(dashboard)
+
+    elseif screen == "house" then
+        local src = d.house or {}
         local items = {}
         -- One flat run of thirty rows is why the full list was unpleasant to
         -- open: nothing told you where "overdue" stopped and "tomorrow" began,
@@ -2271,21 +2817,15 @@ function ReadingOS:openScreen(dashboard, screen)
         if #items == 0 then
             items = { { text = _("Pusto. To jest dobry wynik."), inert = true } }
         end
-        self:showList(screen == "tasks" and "ZADANIA" or "DOM", items, function(item, menu)
+        self:showList("DOM", items, function(item, menu)
             if not item.row then return end
-            -- Same menu as the dashboard: there is one way to act on a task,
-            -- and it is the same one wherever the row is shown.
             local function mark()
                 item.text = "✓  " .. rowText(item.row)
                 item.dim = true          -- genuinely spent, so genuinely greyed
                 item.row = nil
                 menu:updateItems()
             end
-            if screen == "tasks" then
-                self:openTaskDetail(dashboard, item.row, mark)
-            else
-                self:restockMenu(dashboard, item.row, mark)
-            end
+            self:restockMenu(dashboard, item.row, mark)
         end)
 
     elseif screen == "shopping" then
@@ -4971,6 +5511,10 @@ end
 -- one piece of layout arithmetic here that can silently push ZAMKNIJ off the
 -- bottom of a screen that cannot scroll, so it gets a check.
 ReadingOS._Dashboard = Dashboard
+ReadingOS._TasksView = TasksView
+ReadingOS._taskView = taskView -- test_tasks_view.lua
+ReadingOS._taskCount = taskCount
+ReadingOS._taskGroups = taskGroups
 ReadingOS._CraftView = CraftView
 ReadingOS._CraftQR = CraftQR
 
