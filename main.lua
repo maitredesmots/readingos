@@ -1066,7 +1066,7 @@ function Dashboard:build()
     }
     if weather_text ~= "" then segs[#segs + 1] = { widget = text(weather_text, f_hdr), optional = 1 } end
     segs[#segs + 1] = { flex = true }
-    segs[#segs + 1] = { widget = text(version_text, f_hdr) }
+    segs[#segs + 1] = { widget = text(version_text, f_hdr), version = true }
     segs[#segs + 1] = { widget = batt_widget }
     for _i, s in ipairs(segs) do
         if not s.flex then s.w = size(s.widget).w + 2 * seg_pad end
@@ -1092,14 +1092,26 @@ function Dashboard:build()
         HorizontalSpan:new { width = hdr_gap },
         text(wifi_dot, f_hdr),
     }
+    -- The version segment is a target (leo, 2026-09-24): a tap runs the same
+    -- check as WIĘCEJ → SPRAWDŹ AKTUALIZACJE — "Wszystko aktualne (vX)" or
+    -- the install offer. The rest of the strip stays a glance.
     local header = HorizontalGroup:new {}
+    local seg_x, version_x1, version_x2 = pad + bord, nil, nil
     for i, s in ipairs(segs) do
-        if i > 1 then table.insert(header, vline(hdr_h)) end
+        if i > 1 then
+            table.insert(header, vline(hdr_h))
+            seg_x = seg_x + bord
+        end
         local w = s.flex and wifi_w or s.w
         table.insert(header, CenterContainer:new {
             dimen = Geom:new { w = w, h = hdr_h }, s.flex and wifi_widget or s.widget })
+        if s.version then version_x1, version_x2 = seg_x, seg_x + w end
+        seg_x = seg_x + w
     end
+    local hdr_top = y
     add(FrameContainer:new { bordersize = bord, padding = 0, width = cw, radius = 0, header }, hdr_h)
+    self.hit[#self.hit + 1] = { kind = "update", label = "version",
+        x1 = version_x1, x2 = version_x2, y1 = hdr_top, y2 = y }
     gap(8)
 
     -- ---- undo. A tap on e-ink lands a row off more often than on a phone, so
