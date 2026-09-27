@@ -1724,7 +1724,9 @@ function ReadingOS:taskAct(dashboard, row, op, extra, receipt, after)
     local res, err = self:act("task", row.id, payload)
     if not res then
         local msg = _("Nie zapisano — brak połączenia.")
-        if err == "HTTP 409" then
+        if err == "HTTP 409" and op == "give" then
+            msg = _("Nie da się oddać — druga osoba nie widzi zadania. Odśwież ekran.")
+        elseif err == "HTTP 409" then
             msg = _("Zadanie ma otwarte kroki. Dokończ je w tasksss.")
         elseif err == "HTTP 400" then
             msg = _("Tego zadania nie da się pominąć — nie jest cykliczne.")
@@ -1874,10 +1876,18 @@ end
 
 --- Whether the task repeats — from the fetched detail when it landed, else
 --- from the row the dashboard already had (so the screen still gates
---- "Zrobione i zmień osobę"/"Pomiń" correctly even fully offline).
+--- "Zrobione → X"/"Pomiń" correctly even fully offline).
 function TaskDetail:repeats()
     if self.detail then return not not self.detail.repeats end
     return not not (self.row and self.row.repeats)
+end
+
+--- The other person the hand-over buttons name, or nil. Server-computed
+--- (hooome handoverOf), from the detail when it landed, else from the row.
+function TaskDetail:handover()
+    local v = (self.detail and self.detail.handover) or (self.row and self.row.handover)
+    if type(v) == "string" and v ~= "" then return v end
+    return nil
 end
 
 function TaskDetail:build()
@@ -1988,7 +1998,9 @@ function TaskDetail:build()
             -- buttons would start leaving the screen, and says how many it left
             -- out — the full checklist is in tasksss. Budget: the buttons below
             -- (each h_row + frame + gap), the closing rule, one "więcej" line.
-            local n_actions = self:repeats() and 4 or 2
+            -- ZROBIONE + Więcej, plus Pomiń on recurring, plus the hand-over row
+            -- (→ X on recurring, ODDAJ on one-time) when the server names someone.
+            local n_actions = 2 + (self:repeats() and 1 or 0) + (self:handover() and 1 or 0)
             local action_h = h_row + 2 * Screen:scaleBySize(9) + Screen:scaleBySize(8)
             local line_h = fit(0, faceFull(SIZE_ROW))
             local budget = H - pad - n_actions * action_h - Screen:scaleBySize(20) - line_h
@@ -2020,10 +2032,23 @@ function TaskDetail:build()
             gap(8)
         end
 
-        actionRow(_("ZROBIONE"), { kind = "act_done" }, true)
+        -- Same rule as the web, Telegram and HA (tasksss2 doneChoices):
+        -- recurring → "ZROBIONE → X" first, then "BEZ ZMIANY"; one-time →
+        -- "ZROBIONE", then "ODDAJ → X" (hands it over still open). X comes
+        -- from the server (handover) and is nil when the other person can't
+        -- see the task — then only ZROBIONE.
+        local other = self:handover()
         if self:repeats() then
-            actionRow(_("ZROBIONE I ZMIEŃ OSOBĘ"), { kind = "act_reassign" })
+            if other then
+                actionRow(_("ZROBIONE → ") .. other, { kind = "act_doneswap" }, true)
+                actionRow(_("ZROBIONE, BEZ ZMIANY"), { kind = "act_done" })
+            else
+                actionRow(_("ZROBIONE"), { kind = "act_done" }, true)
+            end
             actionRow(_("POMIŃ"), { kind = "act_skip" })
+        else
+            actionRow(_("ZROBIONE"), { kind = "act_done" }, true)
+            if other then actionRow(_("ODDAJ → ") .. other, { kind = "act_give" }) end
         end
         actionRow(_("Więcej"), { kind = "act_more" })
     end
@@ -2054,21 +2079,6 @@ function TaskDetail:confirm(opLabel, op, extra)
             end)
         end,
     })
-end
-
-function TaskDetail:reassignMenu()
-    local ButtonDialogTitle = require("ui/widget/buttondialogtitle")
-    local dialog
-    local buttons = {}
-    for _i, who in ipairs((self.dashboard.data or {}).people or {}) do
-        buttons[#buttons + 1] = { { text = who, callback = function()
-            UIManager:close(dialog)
-            self:confirm(_("Zrobione i zmień osobę → ") .. who, "done", { assign = who })
-        end } }
-    end
-    buttons[#buttons + 1] = { { text = _("Anuluj"), callback = function() UIManager:close(dialog) end } }
-    dialog = ButtonDialogTitle:new { title = _("Zmień osobę na:"), title_align = "center", buttons = buttons }
-    UIManager:show(dialog)
 end
 
 --- Section 14: one-time gets [Na jutro, Archiwizuj]; cyclic gets the two
@@ -2139,8 +2149,15 @@ function TaskDetail:onTap(_arg, ges)
         return true
     end
 
-    if t.kind == "act_reassign" then
-        self:reassignMenu()
+    if t.kind == "act_doneswap" then
+        local who = self:handover()
+        if who then self:confirm(_("Zrobione → ") .. who, "done", { assign = who }) end
+        return true
+    end
+
+    if t.kind == "act_give" then
+        local who = self:handover()
+        if who then self:confirm(_("Oddaj → ") .. who .. _(" (jeszcze niezrobione)"), "give", { assign = who }) end
         return true
     end
 
