@@ -297,6 +297,11 @@ local function request(method, url, body)
     end
     if ok_su and socketutil then socketutil:reset_timeout() end
 
+    -- luasec refuses every https request while KOReader's HTTP proxy is on;
+    -- its own wording tells Leo nothing about where to fix it.
+    if code == "proxy not supported" then
+        return nil, "wyłącz HTTP proxy w ustawieniach sieci KOReadera", nil
+    end
     if type(code) ~= "number" then return nil, tostring(code), nil end
     if code ~= 200 then return nil, "HTTP " .. code, code end
     return table.concat(sink), nil, code
