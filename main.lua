@@ -704,6 +704,8 @@ local ICON_SVG = {
     tasks = [[<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48"><g fill="none" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12h25M19 24h25M19 36h25"/><path d="M5 12l3 3 6-6M5 24l3 3 6-6M5 36l3 3 6-6"/></g></svg>]],
     more = [[<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48"><g fill="#000000"><circle cx="11" cy="24" r="4"/><circle cx="24" cy="24" r="4"/><circle cx="37" cy="24" r="4"/></g></svg>]],
     -- Sleep screen v2.0: category, section, data-type and weather shapes.
+    ["list"] = [[<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48"><g fill="none" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="8" width="30" height="36" rx="3"/><rect x="17" y="4" width="14" height="8" rx="2"/><path d="M16 22h16M16 30h16M16 37h9"/></g></svg>]],
+    ["check"] = [[<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48"><g fill="none" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M8 25l11 11 21-23"/></g></svg>]],
     ["fork"] = [[<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48"><g fill="none" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14q0 5 5 5v19M17 5v12M22 5v14q0 5-5 5"/><path d="M34 43V5q-7 4-7 16v6h7"/></g></svg>]],
     ["broom"] = [[<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48"><g fill="none" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M38 5L24 24"/><path d="M24 24l-8-5-9 13 4 3-3 7 7-4 3 4 13-9z"/><path d="M13 31l7 5M17 27l7 5"/></g></svg>]],
     ["paw"] = [[<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48"><g fill="none" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="24" cy="33" rx="9" ry="7"/><circle cx="12" cy="21" r="4"/><circle cx="19" cy="12" r="4"/><circle cx="29" cy="12" r="4"/><circle cx="36" cy="21" r="4"/></g></svg>]],
@@ -4411,6 +4413,232 @@ local function ssColumn(width, g, f)
     return out, h
 end
 
+--- Sleep screen v3: a face in the same size steps as ssFace, but bold. Like
+--- ssFace it hands Font:getFace an already-scaled size, and getFace scales it
+--- again, so every height built from it is measured, never computed.
+local function ssFaceBold(mult)
+    return Font:getFace("tfont", Screen:scaleBySize(math.max(1, math.floor(SS_FONT * (mult or 1)))))
+end
+
+--- Payload strings only: KOReader's JSON decoder turns null into a truthy
+--- sentinel table, which must read as "absent", not as text.
+local function ssStr(v)
+    if type(v) == "string" then return v end
+    if type(v) == "number" then return tostring(v) end
+    return ""
+end
+
+--- Text that wraps to at most `lines` lines and ends in an ellipsis when it
+--- had to be cut. Measured off a free-height widget first: the real line height
+--- is whatever TextBoxWidget says it is, never a number computed here.
+local function ssBox(text, face, width, fg, lines)
+    local TextBoxWidget = require("ui/widget/textboxwidget")
+    local function make(h)
+        return TextBoxWidget:new {
+            text = text, face = face, width = width, line_height = 0.1,
+            fgcolor = fg, height = h, height_overflow_show_ellipsis = h ~= nil,
+        }
+    end
+    local tw = make(nil)
+    local lh = tw.line_height_px or tw:getSize().h
+    if tw:getSize().h > lines * lh + math.floor(lh / 2) then
+        if tw.free then tw:free() end
+        tw = make(lines * lh)
+    end
+    return tw
+end
+
+--- One category card's content, laid out inside iw x ih (the card's inner box).
+--- Top-down, each widget measured before it is added; the first section that
+--- does not fit stops everything after it, and the rows left out are counted
+--- into the strip pinned to the card's bottom. The strip's height is reserved
+--- up front whenever it will be needed (another person's task, or an overflow
+--- found on the first pass), so content can never push it out of the card.
+--- @return table widget exactly ih tall, table stats { rows, hidden, strip }
+local function ssCardBody(iw, ih, c, f)
+    local sp = function(px) return Screen:scaleBySize(px) end
+    local mine = tonumber(c.mine) or 0
+    local now = type(c.now) == "table" and c.now or {}
+    local later = type(c.later) == "table" and c.later or {}
+    local other = type(c.other) == "table" and c.other or nil
+    local other_line = other and ssStr(other.line) ~= "" and
+        (ssStr(other.who) .. ": " .. ssStr(other.line)) or nil
+
+    -- ---- fixed head
+    local count = mine > 0 and ssText(string.format("%d dziś", mine), f.meta, false) or nil
+    local cat = ssText(ssStr(c.cat), f.cat, false,
+        math.max(sp(40), iw - (count and count:getSize().w or 0) - sp(8) - sp(30)))
+    local head_left = cat
+    if ssStr(c.icon) ~= "" then head_left = ssIconed(c.icon, cat) end
+    local head, head_h = ssPair(iw, head_left, count)
+    local fixed = { { head, head_h }, { VerticalSpan:new { width = sp(4) }, sp(4) } }
+    if mine == 0 then
+        local ok = ssIconed("check", ssText("nic na Ciebie", f.zero, false, iw - sp(40)))
+        local oh = ok:getSize().h
+        fixed[#fixed + 1] = { ok, oh }
+    end
+
+    -- ---- sections: { head widgets, rows }, rows = { widget, height }
+    local sections = {}
+    local row_gap = sp(4)
+    if #now > 0 then
+        local label = ssText("MOŻESZ TERAZ", f.label, true, iw)
+        local rows = {}
+        for _, r in ipairs(now) do
+            local when = ssText(ssStr(r.when), f.when, false, math.floor(iw * 0.4))
+            local wide = ssStr(r.when) ~= "" and (when:getSize().w + sp(10)) or 0
+            local side = ssText("0", f.now, false):getSize().h
+            local bs = sp(2)
+            local box = FrameContainer:new {
+                bordersize = bs, radius = sp(3), padding = 0, margin = 0,
+                background = Blitbuffer.COLOR_WHITE,
+                LineWidget:new {
+                    dimen = Geom:new { w = side - 2 * bs, h = side - 2 * bs },
+                    background = Blitbuffer.COLOR_WHITE,
+                },
+            }
+            local text = ssBox(ssStr(r.text), f.now, math.max(sp(60), iw - side - sp(8) - wide), nil, 2)
+            local left = HorizontalGroup:new { align = "top", box, HorizontalSpan:new { width = sp(8) }, text }
+            local w, h = ssPair(iw, left, ssStr(r.when) ~= "" and when or nil)
+            rows[#rows + 1] = { w, h }
+        end
+        sections[#sections + 1] = { head = { { label, label:getSize().h } }, rows = rows }
+    end
+    if #later > 0 then
+        local label = ssText("PÓŹNIEJ", f.label, true, iw)
+        local lead = { { VerticalSpan:new { width = sp(4) }, sp(4) },
+                       { rule(iw, true), sp(1) },
+                       { VerticalSpan:new { width = sp(4) }, sp(4) },
+                       { label, label:getSize().h } }
+        local timew = ssText("00:00", f.later, false):getSize().w + sp(8)
+        local rows = {}
+        for _, r in ipairs(later) do
+            local tag, tagw = nil, 0
+            if r.both == true then
+                tag = FrameContainer:new {
+                    bordersize = sp(1), radius = sp(2), padding = sp(1), margin = 0,
+                    background = Blitbuffer.COLOR_WHITE,
+                    ssText("OBOJE", f.meta, false),
+                }
+                tagw = tag:getSize().w + sp(8)
+            end
+            local text = ssBox(ssStr(r.text), f.later, math.max(sp(60), iw - timew - tagw), nil, 2)
+            -- Fixed-width time column: the time padded out to the widest "00:00".
+            local time = ssText(ssStr(r.time), f.later, false, timew)
+            local left = HorizontalGroup:new { align = "top", time,
+                HorizontalSpan:new { width = math.max(0, timew - time:getSize().w) }, text }
+            local w, h = ssPair(iw, left, tag)
+            rows[#rows + 1] = { w, h }
+        end
+        sections[#sections + 1] = { head = lead, rows = rows }
+    end
+
+    -- ---- the strip: built for its height, text filled in per pass
+    local strip_pad = sp(3)
+    local function makeStrip(parts)
+        local t = TextWidget:new {
+            text = table.concat(parts, "  \u{00B7}  "), face = f.meta,
+            fgcolor = Blitbuffer.COLOR_WHITE, max_width = iw - 2 * strip_pad, padding = 0,
+        }
+        return FrameContainer:new {
+            background = Blitbuffer.COLOR_BLACK, bordersize = 0, margin = 0,
+            padding = strip_pad, width = iw, t,
+        }
+    end
+    local strip_probe = makeStrip({ "JESZCZE +0" })
+    local strip_h = strip_probe:getSize().h
+    local strip_gap = sp(6)
+
+    local function fill(reserve)
+        local used, out, shown, hidden, stopped = 0, {}, 0, 0, false
+        for _, e in ipairs(fixed) do
+            out[#out + 1] = e[1]; used = used + e[2]
+        end
+        local avail = ih - reserve
+        for _, s in ipairs(sections) do
+            if stopped then
+                hidden = hidden + #s.rows
+            else
+                local heads = 0
+                for _, e in ipairs(s.head) do heads = heads + e[2] end
+                local first = s.rows[1] and s.rows[1][2] or 0
+                if used + heads + row_gap + first > avail then
+                    stopped = true
+                    hidden = hidden + #s.rows
+                else
+                    for _, e in ipairs(s.head) do out[#out + 1] = e[1]; used = used + e[2] end
+                    for _, r in ipairs(s.rows) do
+                        if not stopped and used + row_gap + r[2] <= avail then
+                            out[#out + 1] = VerticalSpan:new { width = row_gap }
+                            out[#out + 1] = r[1]
+                            used = used + row_gap + r[2]
+                            shown = shown + 1
+                        else
+                            stopped = true
+                            hidden = hidden + 1
+                        end
+                    end
+                end
+            end
+        end
+        return out, used, shown, hidden
+    end
+
+    local reserve = other_line and (strip_h + strip_gap) or 0
+    local out, used, shown, hidden = fill(reserve)
+    if hidden > 0 and reserve == 0 then
+        reserve = strip_h + strip_gap
+        out, used, shown, hidden = fill(reserve)
+    end
+    local stats = { rows = shown, hidden = hidden, strip = reserve > 0 }
+    if reserve > 0 then
+        local parts = {}
+        if hidden > 0 then parts[#parts + 1] = string.format("JESZCZE +%d", hidden) end
+        if other_line then parts[#parts + 1] = other_line end
+        local pad_h = ih - used - strip_h
+        if pad_h > 0 then out[#out + 1] = VerticalSpan:new { width = pad_h } end
+        out[#out + 1] = makeStrip(parts)
+    elseif ih - used > 0 then
+        -- Every card is the full height of its cell, so the borders line up.
+        out[#out + 1] = VerticalSpan:new { width = ih - used }
+    end
+    return VerticalGroup:new { align = "left", unpack(out) }, stats
+end
+
+--- Sleep screen v3 layout B: the categories as a 2x2 grid of bordered cards
+--- filling grid_h. Landscape or portrait, always two by two.
+--- @return table widget, number height
+local function ssCards(cw, grid_h, cards)
+    local sp = function(px) return Screen:scaleBySize(px) end
+    local gap, bs, pd = sp(10), sp(2), sp(8)
+    local card_w = math.floor((cw - gap) / 2)
+    local card_h = math.floor((grid_h - gap) / 2)
+    local iw, ih = card_w - 2 * (bs + pd), card_h - 2 * (bs + pd)
+    local f = {
+        cat = ssFace(1.1), meta = ssFace(0.8), label = ssFace(0.8),
+        now = ssFaceBold(1.4) or ssFace(1.4), when = ssFace(0.85),
+        later = ssFace(1.0), zero = ssFaceBold(1.2) or ssFace(1.2),
+    }
+    local grid = VerticalGroup:new { align = "left" }
+    for r = 0, 1 do
+        local line = HorizontalGroup:new { align = "top" }
+        for col = 0, 1 do
+            local c = cards[r * 2 + col + 1]
+            if col == 1 then table.insert(line, HorizontalSpan:new { width = gap }) end
+            local body = VerticalSpan:new { width = ih }
+            if type(c) == "table" then body = ssCardBody(iw, ih, c, f) end
+            table.insert(line, FrameContainer:new {
+                bordersize = bs, radius = sp(8), padding = pd, margin = 0,
+                background = Blitbuffer.COLOR_WHITE,
+                body,
+            })
+        end
+        table.insert(grid, line)
+        if r == 0 then table.insert(grid, VerticalSpan:new { width = gap }) end
+    end
+    return grid, 2 * card_h + gap
+end
+
 --- @param lock_label string|nil replaces the footer's right-hand text when the
 ---   screen is being held open on purpose (see LockView).
 function ReadingOS:ssWidget(d, stale, lock_label)
@@ -4421,6 +4649,9 @@ function ReadingOS:ssWidget(d, stale, lock_label)
     local f_big, f_head, f_cat, f_who = ssFace(1.5), ssFace(1.3), ssFace(1.1), ssFace(1)
     local f_row, f_meta = ssFace(1), ssFace(0.8)
     local sep_w = Screen:scaleBySize(1)
+    -- v3 payload: one card per category. Absent in a cached v2 payload, which
+    -- keeps the column layout below exactly as it was.
+    local cards = type(d) == "table" and type(d.cards) == "table" and d.cards or nil
     local rows, used = {}, 0
     local function add(widget, height)
         rows[#rows + 1] = widget
@@ -4481,6 +4712,7 @@ function ReadingOS:ssWidget(d, stale, lock_label)
     -- ---- status: DZIŚ summary | nearest event ... cache marker.
     local totals = (d and d.totals) or {}
     local summary = d and d.summary
+    if cards and type(d.head) == "string" and d.head ~= "" then summary = d.head end
     if not summary then -- a pre-v2.0 payload still sitting in the cache file
         local n = tonumber(totals.tasks) or 0
         local m10, m100 = n % 10, n % 100
@@ -4529,14 +4761,15 @@ function ReadingOS:ssWidget(d, stale, lock_label)
 
     -- The bottom band is measured up front and its height reserved, so a long
     -- task list pushes rows out of itself rather than pushing the band off.
-    local band, band_h = ssBand(cw, d, get("readingos_ss_lab"))
+    local band, band_h = nil, 0
+    if not cards then band, band_h = ssBand(cw, d, get("readingos_ss_lab")) end
     local footer_h = ssText("readingos", f_who):getSize().h + Screen:scaleBySize(1) + Screen:scaleBySize(4)
     local budget = H - 2 * (pad + box) - used - band_h - footer_h
     local skipped = 0
     -- One column per category, side by side, the way both mockups read it. On a
     -- portrait screen there is no room for that, so the categories stack and the
     -- page is the old single column.
-    local groups = (d and d.groups) or {}
+    local groups = cards and {} or (d and d.groups) or {}
     local ncols = W > H and math.max(1, math.min(3, #groups)) or 1
     local col_gap = Screen:scaleBySize(14)
     local sep_w = Screen:scaleBySize(1)
@@ -4571,7 +4804,12 @@ function ReadingOS:ssWidget(d, stale, lock_label)
     local tallest = 0
     for i = 1, ncols do tallest = math.max(tallest, col_h[i]) end
 
-    if #groups == 0 then
+    if cards then
+        local grid_h = budget - Screen:scaleBySize(6)
+        local grid, gh = ssCards(cw, grid_h, cards)
+        add(grid, gh)
+        gap(6)
+    elseif #groups == 0 then
         add(ssLine(cw, "nic na dziś", "", f_cat))
         gap(6)
     elseif tallest > 0 then
