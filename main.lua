@@ -4035,7 +4035,11 @@ end
 
 --- @return table|nil manifest {version, files}, string|nil err
 function ReadingOS:updateManifest()
-    local data = decode(request("GET", baseUrl() .. "/api/readingos/plugin/manifest"))
+    -- Keep request()'s reason: "no manifest" made a Kindle with Wi-Fi off look
+    -- like a broken server.
+    local body, err = request("GET", baseUrl() .. "/api/readingos/plugin/manifest")
+    if not body then return nil, err end
+    local data = decode(body)
     if type(data) ~= "table" or type(data.files) ~= "table" or not data.version then
         return nil, "no manifest"
     end
