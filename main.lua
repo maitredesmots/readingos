@@ -64,18 +64,29 @@ local DEFAULTS = {
     readingos_cache_max_age = 21600, -- 6 h; anything older renders as stale
     readingos_hints_left = 10,
     readingos_update_checked = 0,    -- unix time of the last update check
-    readingos_ss_refresh_rtc = 900,  -- sleep-screen redraw on an RTC wake, 15 min
+    readingos_ss_refresh_rtc = 0,    -- sleep-screen redraw on an RTC wake in s (900 = 15 min); 0 = off
     readingos_ss_min_battery = 20,   -- below this the device just sleeps
-    readingos_ss_lab = true,         -- planes + ISS band under the tasks
+    readingos_ss_lab = false,        -- planes + ISS band under the tasks
     readingos_ss_light_off = true,   -- keep the frontlight dark across a redraw
     readingos_lock_minutes = 30,     -- on-demand lock screen auto-unlocks after
     readingos_teraz_refresh_min = 15, -- TERAZ refetch + full redraw every N minutes (5/10/15/30/60)
     readingos_teraz_minutes = 0,     -- TERAZ auto-closes after N minutes; 0 = no limit
     readingos_ss_landscape = true,   -- three categories side by side need the width
     readingos_device_id = "",        -- generated once on first "Telefon" open, never regenerated
-    readingos_presence_seconds = 60, -- Phone Companion heartbeat while awake + on Wi-Fi; 0 = off
+    readingos_presence_seconds = 0,  -- Phone Companion heartbeat while awake + on Wi-Fi (60); 0 = off
     readingos_craft_font = 0,        -- CraftView instruction size, -2..+2 steps around the default
     readingos_craft_awake = 0,       -- last "nie gaś ekranu" choice in minutes, re-applied on open
+    -- 2.13 (leo, 2026-10-20): every extra that costs a request, a file write
+    -- or a layout pass is OFF until switched on in USTAWIENIA.
+    readingos_show_weather = false,       -- dashboard header + sleep-screen weather
+    readingos_show_cover = false,         -- hero book cover from the cover browser's sqlite cache
+    readingos_show_tasks_preview = false, -- ZADANIA rows on the dashboard (card stays a target)
+    readingos_live_refresh = false,       -- GET /rev every 60 s while the dashboard is on top
+    readingos_update_on_open = false,     -- daily manifest check when the dashboard opens
+    readingos_telemetry = false,          -- usage log (file write per tap + upload)
+    readingos_battery_log = false,        -- battery samples for the USTAWIENIA drain line
+    readingos_show_counts = false,        -- ZAKUPY / DOM badges in the nav
+    readingos_show_header_info = false,   -- Wi-Fi + SSID + version in the dashboard header
 }
 
 local CACHE_FILE = DataStorage:getDataDir() .. "/cache/readingos.json"
@@ -270,18 +281,20 @@ local function request(method, url, body)
         headers["Content-Type"] = "application/json"
         headers["Content-Length"] = tostring(#body)
     end
+    -- A stalled socket freezes the UI mid-tap, which on e-ink reads as a dead
+    -- device. Cap it hard: an honest failure beats a late answer. The 15 s
+    -- total only holds through socketutil.table_sink (plain ltn12 ignores
+    -- it), and the sink reads the cap when built — so set it first.
+    local ok_su, socketutil = pcall(require, "socketutil")
+    if ok_su and socketutil then socketutil:set_timeout(5, 15) end
     local req = {
         url = url,
         method = method,
-        sink = ltn12.sink.table(sink),
+        sink = (ok_su and socketutil and socketutil.table_sink)
+            and socketutil.table_sink(sink) or ltn12.sink.table(sink),
         headers = headers,
         source = body and ltn12.source.string(body) or nil,
     }
-
-    -- A stalled socket freezes the UI mid-tap, which on e-ink reads as a dead
-    -- device. Cap it hard: an honest failure beats a late answer.
-    local ok_su, socketutil = pcall(require, "socketutil")
-    if ok_su and socketutil then socketutil:set_timeout(5, 15) end
 
     local code
     local ok_ssl, https = pcall(require, "ssl.https")
@@ -470,6 +483,7 @@ local function telemetrySave(events)
 end
 
 local function track(screen, action, detail, dwell_ms)
+    if not get("readingos_telemetry") then return end
     local q = telemetryQueue()
     -- Bounded: a device offline for a month must not grow an unbounded file.
     while #q >= TELEMETRY_MAX do table.remove(q, 1) end
@@ -572,6 +586,7 @@ local function battLoad()
 end
 
 local function battSample(ev)
+    if not get("readingos_battery_log") then return end
     local ok, cap = pcall(function() return Device:getPowerDevice():getCapacity() end)
     if not ok or type(cap) ~= "number" then return end
     local ok_c, chg = pcall(function() return Device:getPowerDevice():isCharging() end)
@@ -586,6 +601,7 @@ local function battSample(ev)
 end
 
 local function flushTelemetry()
+    if not get("readingos_telemetry") then return end
     local q = telemetryQueue()
     if #q == 0 then return end
     local body = encode({ events = q })
@@ -958,7 +974,7 @@ end
 local REV_POLL_SECONDS = 60
 
 function Dashboard:scheduleRevPoll()
-    if self.rev_poll then return end
+    if self.rev_poll or not get("readingos_live_refresh") then return end
     self.rev_poll = function()
         self.rev_poll_pending = false
         if self.closed then return end
@@ -1108,7 +1124,7 @@ function Dashboard:build()
     -- network round trip — pcall'd because a hardware quirk must degrade to
     -- "—", not crash the whole dashboard. ZAMKNIJ is no longer up here: the
     -- close action is the first, largest bottom-nav target instead.
-    local weather = d.weather
+    local weather = get("readingos_show_weather") and d.weather or nil
     local weather_text = ""
     if type(weather) == "table" and weather.temp then
         weather_text = string.format("%d°C", weather.temp)
@@ -1123,9 +1139,13 @@ function Dashboard:build()
     -- Deliberately NOT using NetworkMgr:isOnline(), which resolves an
     -- external hostname with no Lua-side timeout: exactly the kind of thing
     -- that could hang the whole dashboard on a bad network.
-    local ok_wifi_on, wifi_on = pcall(function() return NetworkMgr:isWifiOn() end)
+    local header_info = get("readingos_show_header_info")
+    local ok_wifi_on, wifi_on = false, nil
+    if header_info then ok_wifi_on, wifi_on = pcall(function() return NetworkMgr:isWifiOn() end) end
     local wifi_name, wifi_dot = "Wi-Fi", "○"
-    if not ok_wifi_on then
+    if not header_info then
+        wifi_name, wifi_dot = "", ""
+    elseif not ok_wifi_on then
         wifi_name, wifi_dot = "—", ""
     elseif wifi_on then
         local ok_conn, connected = pcall(function() return NetworkMgr:isConnected() end)
@@ -1174,15 +1194,15 @@ function Dashboard:build()
         table.insert(batt_widget, HorizontalSpan:new { width = hdr_gap })
         table.insert(batt_widget, batteryIcon(math.max(0, math.min(capacity, 100)) / 100, Screen:scaleBySize(11)))
     end
-    local wifi_min = Screen:scaleBySize(20) -- the SSID's own minimum
-        + 2 * seg_pad + hdr_ico + 2 * hdr_gap + size(text(wifi_dot, f_hdr)).w
+    local wifi_min = header_info and (Screen:scaleBySize(20) -- the SSID's own minimum
+        + 2 * seg_pad + hdr_ico + 2 * hdr_gap + size(text(wifi_dot, f_hdr)).w) or 0
     local segs = {
         { widget = text(os.date("%H:%M"), dashFace(SIZE_TITLE), { bold = true }) },
         { widget = text(plDate(), f_hdr), optional = 2 },
     }
     if weather_text ~= "" then segs[#segs + 1] = { widget = text(weather_text, f_hdr), optional = 1 } end
     segs[#segs + 1] = { flex = true }
-    segs[#segs + 1] = { widget = text(version_text, f_hdr), version = true }
+    if header_info then segs[#segs + 1] = { widget = text(version_text, f_hdr), version = true } end
     segs[#segs + 1] = { widget = batt_widget }
     for _i, s in ipairs(segs) do
         if not s.flex then s.w = size(s.widget).w + 2 * seg_pad end
@@ -1201,13 +1221,15 @@ function Dashboard:build()
     end
     local wifi_w = math.max(wifi_min, hdr_inner - usedWidth())
     local ssid_room = wifi_w - 2 * seg_pad - hdr_ico - 2 * hdr_gap - size(text(wifi_dot, f_hdr)).w
-    local wifi_widget = HorizontalGroup:new {
+    -- Header info off: the flex segment stays as empty space, so clock and
+    -- battery keep their places at both ends.
+    local wifi_widget = header_info and HorizontalGroup:new {
         icon("wifi", hdr_ico),
         HorizontalSpan:new { width = hdr_gap },
         text(wifi_name, f_hdr, { max_width = ssid_room }),
         HorizontalSpan:new { width = hdr_gap },
         text(wifi_dot, f_hdr),
-    }
+    } or HorizontalSpan:new { width = 0 }
     -- The version segment is a target (leo, 2026-09-24): a tap runs the same
     -- check as WIĘCEJ → SPRAWDŹ AKTUALIZACJE — "Wszystko aktualne (vX)" or
     -- the install offer. The rest of the strip stays a glance.
@@ -1226,8 +1248,10 @@ function Dashboard:build()
     end
     local hdr_top = y
     add(FrameContainer:new { bordersize = bord, padding = 0, width = cw, radius = 0, header }, hdr_h)
-    self.hit[#self.hit + 1] = { kind = "update", label = "version",
-        x1 = version_x1, x2 = version_x2, y1 = hdr_top, y2 = y }
+    if version_x1 then
+        self.hit[#self.hit + 1] = { kind = "update", label = "version",
+            x1 = version_x1, x2 = version_x2, y1 = hdr_top, y2 = y }
+    end
     gap(8)
 
     -- ---- undo. A tap on e-ink lands a row off more often than on a phone, so
@@ -1289,6 +1313,8 @@ function Dashboard:build()
     local summary = table.concat(tparts, " · ")
     if summary == "" and totals.tasks and totals.tasks > 0 then summary = tostring(totals.tasks) end
     local tasks = d.preview_tasks or d.tasks or {}
+    local show_preview = get("readingos_show_tasks_preview")
+    local show_counts = get("readingos_show_counts")
     local shopping = d.shopping or { total = 0 }
 
     -- CO CZYTAM's lead column: the book's real cover where the other cards
@@ -1299,7 +1325,10 @@ function Dashboard:build()
     local ico = Screen:scaleBySize(34)
     local book = self.plugin:currentBook(d)
     local cover_w, cover_h = Screen:scaleBySize(60), Screen:scaleBySize(82)
-    local ok_cov, cover_bb = pcall(function() return self.plugin:bookCover(book.title) end)
+    local ok_cov, cover_bb = false, nil
+    if get("readingos_show_cover") then
+        ok_cov, cover_bb = pcall(function() return self.plugin:bookCover(book.title) end)
+    end
     local lead, lead_w = icon("book.opened", ico), ico_col
     if ok_cov and cover_bb and ImageWidget then
         local ok_img, img = pcall(function()
@@ -1434,9 +1463,10 @@ function Dashboard:build()
             table.insert(summary_widget, text(summary, f_head, { max_width = iw - chev - Screen:scaleBySize(90) }))
         end
         task_items[#task_items + 1] = { widget = cardRow(h_row, summary_widget, chevron()) }
-        if #tasks == 0 then
+        -- Preview off: the header line alone, still the way into the task view.
+        if show_preview and #tasks == 0 then
             task_items[#task_items + 1] = { widget = cardRow(h_row, text("nic na mnie", dashFace(SIZE_META), { gray = true })) }
-        else
+        elseif show_preview then
             task_items[#task_items + 1] = { widget = hline(iw) }
             for i = 1, math.min(max_tasks, #tasks) do
                 local it = tasks[i]
@@ -1457,7 +1487,7 @@ function Dashboard:build()
     end
 
     -- As many preview rows as fit (the server sends up to eight), fewest one.
-    for n = PREVIEW_MAX, 1, -1 do
+    for n = show_preview and PREVIEW_MAX or 1, 1, -1 do
         local rows_n, hit_n, y0 = #rows, #self.hit, y
         layoutTasks(n)
         if y <= limit or n == 1 then break end
@@ -1500,9 +1530,9 @@ function Dashboard:build()
     add(rule(cw), nav_rule)
     local nav_items = {
         { icon = "close", label = "ZAMKNIJ", target = { kind = "close", label = "close" } },
-        { icon = "cart", label = "ZAKUPY", count = shopping.total, target = { screen = "shopping", label = "shopping" } },
+        { icon = "cart", label = "ZAKUPY", count = show_counts and shopping.total or nil, target = { screen = "shopping", label = "shopping" } },
         { icon = "yarn", label = "CRAFTSSS", target = { screen = "crafts", label = "crafts" } },
-        { icon = "home", label = "DOM", count = out, target = { screen = "house", label = "house" } },
+        { icon = "home", label = "DOM", count = show_counts and out or nil, target = { screen = "house", label = "house" } },
         { icon = "more", label = "WIĘCEJ", target = { kind = "more", label = "more" } },
     }
     local seg_w = math.floor(cw / #nav_items)
@@ -4859,7 +4889,7 @@ function ReadingOS:ssWidget(d, stale, lock_label, opts)
         head_right = HorizontalGroup:new { align = "center", batt_w, hspan(14), x_icon }
     end
     local room = cw - head_right:getSize().w - Screen:scaleBySize(16)
-    local weather = type(d) == "table" and type(d.weather) == "table" and d.weather or nil
+    local weather = get("readingos_show_weather") and type(d) == "table" and type(d.weather) == "table" and d.weather or nil
     -- Cells drop from the right when the panel runs out of width — wind first,
     -- temperature last. Never a guessed or partial number.
     for i, c in ipairs(weather and weather.cells or {}) do
@@ -5914,7 +5944,7 @@ function ReadingOS:showDashboard()
     -- The radio is already up from the fetch above, so noticing a new version
     -- here is free. Checked once a day: this is a reading device, not a
     -- package manager.
-    if not age then
+    if not age and get("readingos_update_on_open") then
         local last = tonumber(get("readingos_update_checked")) or 0
         if os.time() - last > 86400 then
             set("readingos_update_checked", os.time())
@@ -6043,6 +6073,19 @@ function ReadingOS:addToMainMenu(menu_items)
         callback = function()
             if not self:showDashboard() then self:openSettings() end
         end,
+    }
+end
+
+--- One "<label>: tak/nie" switch for a boolean setting (2.13 toggles).
+local function onOffItem(key, label, separator)
+    return {
+        text_func = function() return label .. ": " .. (get(key) and "tak" or "nie") end,
+        keep_menu_open = true,
+        callback = function(touchmenu)
+            set(key, not get(key))
+            if touchmenu then touchmenu:updateItems() end
+        end,
+        separator = separator,
     }
 end
 
@@ -6194,6 +6237,15 @@ function ReadingOS:settingsItems()
                 end,
                 separator = true,
             },
+            onOffItem("readingos_show_weather", "Pogoda (nagłówek + sen)"),
+            onOffItem("readingos_show_cover", "Okładka książki"),
+            onOffItem("readingos_show_tasks_preview", "Podgląd ZADANIA"),
+            onOffItem("readingos_show_counts", "Liczniki ZAKUPY/DOM"),
+            onOffItem("readingos_show_header_info", "Wi-Fi/SSID/wersja w nagłówku"),
+            onOffItem("readingos_live_refresh", "Auto-odświeżanie pulpitu"),
+            onOffItem("readingos_update_on_open", "Sprawdzanie aktualizacji przy otwarciu"),
+            onOffItem("readingos_telemetry", "Telemetria"),
+            onOffItem("readingos_battery_log", "Dziennik baterii", true),
             {
                 text_func = function()
                     return "Pasek LAB (samoloty, ISS): " .. (get("readingos_ss_lab") and "tak" or "nie")
