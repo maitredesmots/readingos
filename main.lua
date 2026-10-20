@@ -1153,7 +1153,9 @@ function Dashboard:build()
 
     local ok_batt, capacity = pcall(function() return Device:getPowerDevice():getCapacity() end)
     local has_batt = ok_batt and type(capacity) == "number"
-    local batt_text = has_batt and (capacity .. "%") or "—"
+    local ok_chg, charging = pcall(function() return Device:getPowerDevice():isCharging() end)
+    -- ⚡ already renders on the PW3 (sleep-screen header); only while plugged in.
+    local batt_text = has_batt and ((ok_chg and charging) and ("\u{26A1}" .. capacity .. "%") or (capacity .. "%")) or "—"
 
     -- Fixed segments are measured first and reserve their own width; the
     -- Wi-Fi segment gets whatever is left and truncates the SSID inside it.
@@ -1574,6 +1576,18 @@ function Dashboard:onClose()
     UIManager:close(self)
     return true
 end
+
+--- KOReader broadcasts Charging/NotCharging on plug/unplug: rebuild from the
+--- data already held (no request) so the header's ⚡ follows the cable.
+function Dashboard:onCharging()
+    local stale_root = self[1]
+    self[1] = nil
+    if stale_root and stale_root.free then pcall(function() stale_root:free() end) end
+    self.hit = {}
+    self[1] = self:build()
+    UIManager:setDirty(self, "ui")
+end
+Dashboard.onNotCharging = Dashboard.onCharging
 
 function Dashboard:onCloseWidget()
     self:cancelRevPoll()
