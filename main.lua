@@ -1679,6 +1679,7 @@ function ReadingOS:currentBook(d)
 end
 
 
+-- BEGIN reading-pure (test_reading_list.lua runs this region on its own)
 --- Title as a comparison key: case-folded, punctuation and spacing dropped.
 local function titleKey(s)
     return (tostring(s or ""):lower():gsub("[%s%p]", ""))
@@ -1693,6 +1694,244 @@ local function titleMatches(key, other)
     -- one-word title cannot claim every book that starts the same way.
     local short = #key < #o and key or o
     return #short >= 8 and (key:sub(1, #short) == o:sub(1, #short))
+end
+
+-- Positions from two readers of the same chapter differ by about 1 %
+-- (r/xteinkereader), so less than half a percent ahead is noise, not progress.
+local READING_JUMP_MIN = 0.005
+
+--- Payload text only: KOReader's JSON null is a truthy table, never text.
+local function readingStr(v)
+    if type(v) == "string" then return v end
+    if type(v) == "number" then return tostring(v) end
+    return ""
+end
+
+local function readingFraction(v)
+    return math.max(0, math.min(tonumber(v) or 0, 1))
+end
+
+--- "13%", and "<1%" for a book just started (the X4 reports 0.13 %).
+local function readingPct(fraction)
+    if fraction > 0 and fraction < 0.01 then return "<1%" end
+    return string.format("%d%%", math.floor(fraction * 100 + 0.5))
+end
+
+--- CO CZYTAM rows from the dashboard's `reading` list (hooome: max 5,
+--- newest first): the title, and "X4 · 13% · 13.10 20:27" on the right.
+local function readingItems(list)
+    local out = {}
+    for _, e in ipairs(type(list) == "table" and list or {}) do
+        local title = type(e) == "table" and readingStr(e.title) or ""
+        if title ~= "" and #out < 5 then
+            local meta = {}
+            local device = readingStr(e.device)
+            if device ~= "" then meta[#meta + 1] = device end
+            meta[#meta + 1] = readingPct(readingFraction(e.fraction))
+            local when = readingStr(e.when)
+            if when ~= "" then meta[#meta + 1] = when end
+            out[#out + 1] = { text = title, mandatory = table.concat(meta, " · "), entry = e }
+        end
+    end
+    return out
+end
+
+--- The file a CO CZYTAM row opens, or nil (then the plugin asks).
+--- Order: the file picked for this title before → the recent file whose
+--- partial MD5 is the row's kosync document → a recent file whose title
+--- matches. `candidates` = { { file, titles = {…} } }; `exists` and `md5`
+--- are passed in so this runs without KOReader.
+local function readingPath(entry, saved, candidates, exists, md5)
+    local key = titleKey(readingStr(entry.title))
+    if key == "" then return nil end
+    local s = type(saved) == "table" and saved[key]
+    if type(s) == "string" and exists(s) then return s end
+    local doc = readingStr(entry.doc):lower()
+    if #doc == 32 then
+        for _, c in ipairs(candidates) do
+            if exists(c.file) and md5(c.file) == doc then return c.file end
+        end
+    end
+    for _, c in ipairs(candidates) do
+        for _, t in ipairs(c.titles or {}) do
+            if titleMatches(key, t) and exists(c.file) then return c.file end
+        end
+    end
+    return nil
+end
+
+--- The question after opening a book, or nil when the newest sync is not
+--- ahead of where this Kindle is. Second value: the fraction to jump to.
+local function jumpOffer(entry, local_fraction)
+    local remote = readingFraction(entry.fraction)
+    if remote - (tonumber(local_fraction) or 0) < READING_JUMP_MIN then return nil end
+    local device = readingStr(entry.device)
+    local when = readingStr(entry.when)
+    local pct = readingPct(remote)
+    return string.format("%s: %s%s.\nPrzejść do %s?", device ~= "" and device or "Inny czytnik", pct,
+        when ~= "" and (" (" .. when .. ")") or "", pct), remote
+end
+-- END reading-pure
+
+-- ---------------------------------------------------------------- CO CZYTAM
+
+--- Up to 25 recent files with every title each goes by: the cover browser's
+--- (what the file browser already extracted — no document is opened) and the
+--- file name without its extension.
+local function readingCandidates()
+    local out = {}
+    pcall(function()
+        local ok_h, ReadHistory = pcall(require, "readhistory")
+        if not (ok_h and type(ReadHistory) == "table" and type(ReadHistory.hist) == "table") then return end
+        local ok_b, BookInfoManager = pcall(require, "bookinfomanager")
+        if not (ok_b and type(BookInfoManager) == "table") then BookInfoManager = nil end
+        for i, it in ipairs(ReadHistory.hist) do
+            if i > 25 then break end
+            if type(it) == "table" and type(it.file) == "string" then
+                local titles = {}
+                local info = BookInfoManager and BookInfoManager:getBookInfo(it.file, false)
+                if type(info) == "table" and type(info.title) == "string" then titles[#titles + 1] = info.title end
+                local _dir, name = util.splitFilePathName(it.file)
+                if name then titles[#titles + 1] = (name:gsub("%.%w+$", "")) end
+                out[#out + 1] = { file = it.file, titles = titles }
+            end
+        end
+    end)
+    return out
+end
+
+local function isFile(p)
+    return type(p) == "string" and lfs.attributes(p, "mode") == "file"
+end
+
+--- Where the open document is, 0..1 (same reading as currentBook).
+local function readerFraction(ui)
+    local ok, p = pcall(function()
+        if ui.document.info and ui.document.info.has_pages then
+            return ui.paging and ui.paging:getLastPercent()
+        end
+        return ui.rolling and ui.rolling:getLastPercent()
+    end)
+    return ok and readingFraction(p) or 0
+end
+
+--- Tell the board which kosync document this file is (CWA rewrites EPUBs on
+--- download, so its own checksum table misses them). Once per file, only on
+--- Wi-Fi that is already up, never when the row already carries this hash.
+local function reportFingerprint(entry, path)
+    local ok, md5 = pcall(util.partialMD5, path)
+    if not (ok and type(md5) == "string" and #md5 == 32) then return end
+    if md5 == readingStr(entry.doc):lower() then return end
+    local sent = get("readingos_docs_sent")
+    sent = type(sent) == "table" and sent or {}
+    if sent[md5] then return end
+    local ok_c, connected = pcall(function() return NetworkMgr:isConnected() end)
+    if not (ok_c and connected) then return end
+    local body = encode({ title = readingStr(entry.title), authors = readingStr(entry.author), doc = md5 })
+    local res, err
+    if body then res, err = request("POST", baseUrl() .. "/api/readingos/reading/doc", body) end
+    if not res then
+        logger.warn("ReadingOS: fingerprint not sent:", err)
+        return
+    end
+    local copy = {}
+    for k, v in pairs(sent) do copy[k] = v end
+    copy[md5] = true
+    set("readingos_docs_sent", copy)
+end
+
+--- Runs in the NEW ReaderUI once the book is ready (the plugin instance that
+--- opened it is gone by then, so nothing here may touch `self`). Always asks,
+--- never jumps on its own (Leo Q26).
+local function afterReadingOpen(ui, entry, path)
+    UIManager:nextTick(function()
+        local text, remote = jumpOffer(entry, readerFraction(ui))
+        if text then
+            track("co czytam", "jump_offer")
+            UIManager:show(ConfirmBox:new {
+                text = text,
+                ok_text = _("Tak"),
+                cancel_text = _("Nie"),
+                ok_callback = function()
+                    track("co czytam", "jump")
+                    pcall(function() ui.link:addCurrentLocationToStack() end)
+                    ui:handleEvent(require("ui/event"):new("GotoPercent", remote * 100))
+                end,
+            })
+        end
+        UIManager:scheduleIn(1, function() reportFingerprint(entry, path) end)
+    end)
+end
+
+--- Open `path` for a CO CZYTAM row and remember it for that title.
+--- showReader closes the current document and the file manager, so every
+--- ReadingOS widget goes first. Same open routes as KOReader's own bookmark
+--- browser: the open book, another book from the reader, or the file manager.
+function ReadingOS:openReading(dashboard, menu, entry, path)
+    local saved = get("readingos_book_paths")
+    local paths = {}
+    for k, v in pairs(type(saved) == "table" and saved or {}) do paths[k] = v end
+    paths[titleKey(readingStr(entry.title))] = path
+    set("readingos_book_paths", paths)
+
+    if menu then UIManager:close(menu) end
+    dashboard:onClose()
+    local after = function(ui) afterReadingOpen(ui, entry, path) end
+    local ui = self.ui
+    if ui and ui.document then
+        if ui.document.file == path then return after(ui) end
+        return ui:switchDocument(path, nil, after)
+    end
+    if ui and ui.openFile then return ui:openFile(path, nil, nil, nil, after) end
+    require("apps/reader/readerui"):showReader(path, nil, nil, nil, after)
+end
+
+--- No file found for the row: Leo points at it once, it is remembered.
+function ReadingOS:chooseReadingPath(dashboard, menu, entry)
+    local PathChooser = require("ui/widget/pathchooser")
+    local chooser = PathChooser:new {
+        title = string.format(_("Gdzie jest „%s”? Stuknij plik."), readingStr(entry.title)),
+        select_directory = false,
+        path = G_reader_settings:readSetting("home_dir") or Device.home_dir or "/",
+        onConfirm = function(path)
+            track("co czytam", "path_chosen")
+            -- the chooser closes itself right after this returns
+            UIManager:nextTick(function() self:openReading(dashboard, menu, entry, path) end)
+        end,
+    }
+    -- PathChooser takes a file only on a long press and ignores a tap. Long
+    -- press is never the only route (design contract): a tap on a file asks
+    -- the same "Choose this file?" question.
+    chooser.onMenuSelect = function(c, item)
+        local p = item and item.path
+        if type(p) == "string" and p:sub(-2) ~= "/." and isFile(p) then return c:onMenuHold(item) end
+        return PathChooser.onMenuSelect(c, item)
+    end
+    UIManager:show(chooser)
+end
+
+--- CO CZYTAM: the books in progress on every kosync device. The first row
+--- goes back to the open book, which is what a tap on the card used to do.
+function ReadingOS:showReading(dashboard, list)
+    local items = readingItems(list)
+    if self.ui and self.ui.document then
+        table.insert(items, 1, { text = _("CZYTAJ DALEJ: ") .. self:currentBook(nil).title, bold = true, kind = "back" })
+    end
+    self:showList("CO CZYTAM", items, function(item, menu)
+        if item.kind == "back" then
+            UIManager:close(menu)
+            return dashboard:onClose()
+        end
+        local entry = item.entry
+        track("co czytam", "pick")
+        local memo = {}
+        local path = readingPath(entry, get("readingos_book_paths"), readingCandidates(), isFile, function(p)
+            if memo[p] == nil then memo[p] = util.partialMD5(p) or false end
+            return memo[p]
+        end)
+        if path then return self:openReading(dashboard, menu, entry, path) end
+        self:chooseReadingPath(dashboard, menu, entry)
+    end)
 end
 
 --- The hero book's cover, looked up on the device — never fetched.
@@ -2829,6 +3068,8 @@ function ReadingOS:handle(dashboard, target, is_hold)
 
     if target.kind == "continue" then
         track("home", "continue")
+        local list = type(dashboard.data) == "table" and dashboard.data.reading
+        if #readingItems(list) > 0 then return self:showReading(dashboard, list) end
         dashboard:onClose()
         if not (self.ui and self.ui.document) then
             UIManager:show(InfoMessage:new { text = _("Najpierw otwórz książkę w menedżerze plików.") })
