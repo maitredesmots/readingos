@@ -69,6 +69,8 @@ local DEFAULTS = {
     readingos_ss_lab = true,         -- planes + ISS band under the tasks
     readingos_ss_light_off = true,   -- keep the frontlight dark across a redraw
     readingos_lock_minutes = 30,     -- on-demand lock screen auto-unlocks after
+    readingos_teraz_refresh_min = 15, -- TERAZ refetch + full redraw every N minutes (5/10/15/30/60)
+    readingos_teraz_minutes = 0,     -- TERAZ auto-closes after N minutes; 0 = no limit
     readingos_ss_landscape = true,   -- three categories side by side need the width
     readingos_device_id = "",        -- generated once on first "Telefon" open, never regenerated
     readingos_presence_seconds = 60, -- Phone Companion heartbeat while awake + on Wi-Fi; 0 = off
@@ -476,6 +478,111 @@ local function track(screen, action, detail, dwell_ms)
         detail = detail, dwell_ms = dwell_ms,
     }
     telemetrySave(q)
+end
+
+-- ------------------------------------------------------------ battery log
+--
+-- A ring buffer of {t, cap, chg, ev} samples (ev = "awake" | "suspend" |
+-- "resume"), written on every TERAZ refresh, on suspend / resume and when the
+-- dashboard opens. USTAWIENIA turns it into "%/h awake" and "%/h asleep".
+
+local BATT_FILE = DataStorage:getDataDir() .. "/cache/readingos-battery.json"
+local BATT_MAX = 500
+
+-- BEGIN battery-pure (test_teraz.lua loads this region straight out of main.lua)
+local BATT_WINDOW = 48 * 3600     -- only the last two days count
+local BATT_MIN_DT = 300           -- shorter segments are 1 % quantisation noise
+local BATT_AWAKE_MAX_DT = 3 * 3600 -- a longer gap between awake samples is not "TERAZ"
+
+--- Drain in %/h from the sample list. A segment is two CONSECUTIVE samples:
+--- awake = (awake|resume) -> awake, asleep = suspend -> resume. A charging
+--- endpoint, a rise in charge or a too-short gap makes a segment unusable.
+--- Rates are total % over total hours (not an average of noisy per-segment
+--- rates); a kind with fewer than 2 usable segments reports nil.
+--- @return table { awake = %/h|nil, asleep = %/h|nil, awake_n, asleep_n, hours_left|nil }
+local function batteryDrain(samples, now)
+    local cutoff = (now or os.time()) - BATT_WINDOW
+    local a_drop, a_sec, a_n = 0, 0, 0
+    local s_drop, s_sec, s_n = 0, 0, 0
+    for i = 2, #samples do
+        local p, c = samples[i - 1], samples[i]
+        if type(p) == "table" and type(c) == "table" and type(p.t) == "number"
+            and type(c.t) == "number" and type(p.cap) == "number" and type(c.cap) == "number"
+            and p.t >= cutoff and not p.chg and not c.chg then
+            local dt, drop = c.t - p.t, p.cap - c.cap
+            if dt >= BATT_MIN_DT and drop >= 0 then
+                if (p.ev == "awake" or p.ev == "resume") and c.ev == "awake" and dt <= BATT_AWAKE_MAX_DT then
+                    a_drop, a_sec, a_n = a_drop + drop, a_sec + dt, a_n + 1
+                elseif p.ev == "suspend" and c.ev == "resume" then
+                    s_drop, s_sec, s_n = s_drop + drop, s_sec + dt, s_n + 1
+                end
+            end
+        end
+    end
+    local out = { awake_n = a_n, asleep_n = s_n }
+    if a_n >= 2 then out.awake = a_drop / (a_sec / 3600) end
+    if s_n >= 2 then out.asleep = s_drop / (s_sec / 3600) end
+    local last = samples[#samples]
+    if out.awake and out.awake > 0 and type(last) == "table" and type(last.cap) == "number" then
+        out.hours_left = last.cap / out.awake
+    end
+    return out
+end
+
+--- The one USTAWIENIA line. Polish decimal comma, a real minus sign.
+local function batteryText(st)
+    local function pct(v) return (string.format("%.1f", v):gsub("%.", ",")) end
+    if not st.awake and not st.asleep then return "Bateria: za mało danych" end
+    local parts = {}
+    parts[#parts + 1] = "na żywo " .. (st.awake and ("\u{2212}" .. pct(st.awake) .. " %/h") or "za mało danych")
+    parts[#parts + 1] = "uśpiony " .. (st.asleep and ("\u{2212}" .. pct(st.asleep) .. " %/h") or "za mało danych")
+    if st.hours_left then
+        parts[#parts + 1] = string.format("zostało ~%d h (na żywo)", math.floor(st.hours_left + 0.5))
+    end
+    return "Bateria: " .. table.concat(parts, " \u{00B7} ")
+end
+
+--- "2026-10-20T14:05:00.000Z" (UTC) -> epoch. The local UTC offset is taken
+--- from now with the same DST flag on both sides, so it is the true offset.
+local function isoUtcToEpoch(iso)
+    local y, mo, d, h, mi, sec = tostring(iso or ""):match("^(%d+)-(%d+)-(%d+)[T ](%d+):(%d+):?(%d*)")
+    if not y then return nil end
+    local now = os.time()
+    local lt, ut = os.date("*t", now), os.date("!*t", now)
+    ut.isdst = lt.isdst
+    local off = os.time(lt) - os.time(ut)
+    return os.time({ year = tonumber(y), month = tonumber(mo), day = tonumber(d),
+        hour = tonumber(h), min = tonumber(mi), sec = tonumber(sec) or 0, isdst = lt.isdst }) + off
+end
+
+local function isoUtcToHM(iso)
+    local e = isoUtcToEpoch(iso)
+    return e and os.date("%H:%M", e) or ""
+end
+-- END battery-pure
+
+local function battLoad()
+    local f = io.open(BATT_FILE, "r")
+    if not f then return {} end
+    local content = f:read("*all")
+    f:close()
+    local j = decode(content)
+    if type(j) == "table" and type(j.samples) == "table" then return j.samples end
+    return {}
+end
+
+local function battSample(ev)
+    local ok, cap = pcall(function() return Device:getPowerDevice():getCapacity() end)
+    if not ok or type(cap) ~= "number" then return end
+    local ok_c, chg = pcall(function() return Device:getPowerDevice():isCharging() end)
+    local s = battLoad()
+    while #s >= BATT_MAX do table.remove(s, 1) end
+    s[#s + 1] = { t = os.time(), cap = cap, chg = (ok_c and chg) and true or false, ev = ev }
+    util.makePath(DataStorage:getDataDir() .. "/cache/")
+    local f = io.open(BATT_FILE, "w")
+    if not f then return end
+    f:write(encode({ samples = s }) or '{"samples":[]}')
+    f:close()
 end
 
 local function flushTelemetry()
@@ -2781,7 +2888,9 @@ function ReadingOS:openMore(dashboard, start_tab)
                 text = _("Działania"), icon = "appbar.tools",
                 item("ODŚWIEŻ", function() self:refreshNow(dashboard) end),
                 item("TELEFON", function() self:showPhone() end),
+                item("TERAZ", function() self:showTeraz() end),
                 item("ZABLOKUJ EKRAN", function() self:showLockScreen() end),
+                item("HISTORIA", function() self:showHistory() end),
             }
             tabs[#tabs + 1] = {
                 text = _("Ekrany"), icon = "appbar.navigation",
@@ -4437,6 +4546,13 @@ local function ssStr(v)
     return ""
 end
 
+--- A task id from the payload, or nil: numbers and strings only, so the JSON
+--- null sentinel (a truthy table) can never become a tappable row.
+local function ssId(v)
+    if type(v) == "number" or (type(v) == "string" and v ~= "") then return v end
+    return nil
+end
+
 --- Text that wraps to at most `lines` lines and ends in an ellipsis when it
 --- had to be cut. Measured off a free-height widget first: the real line height
 --- is whatever TextBoxWidget says it is, never a number computed here.
@@ -4464,7 +4580,7 @@ end
 --- up front whenever it will be needed (another person's task, or an overflow
 --- found on the first pass), so content can never push it out of the card.
 --- @return table widget exactly ih tall, table stats { rows, hidden, strip }
-local function ssCardBody(iw, ih, c, f)
+local function ssCardBody(iw, ih, c, f, hits, ox, oy)
     local sp = function(px) return Screen:scaleBySize(px) end
     local mine = tonumber(c.mine) or 0
     local now = type(c.now) == "table" and c.now or {}
@@ -4509,7 +4625,7 @@ local function ssCardBody(iw, ih, c, f)
             local text = ssBox(ssStr(r.text), f.now, math.max(sp(60), iw - side - sp(8) - wide), nil, 2)
             local left = HorizontalGroup:new { align = "top", box, HorizontalSpan:new { width = sp(8) }, text }
             local w, h = ssPair(iw, left, ssStr(r.when) ~= "" and when or nil)
-            rows[#rows + 1] = { w, h }
+            rows[#rows + 1] = { w, h, ssId(r.id), ssStr(r.text) }
         end
         sections[#sections + 1] = { head = { { label, label:getSize().h } }, rows = rows }
     end
@@ -4537,7 +4653,7 @@ local function ssCardBody(iw, ih, c, f)
             local left = HorizontalGroup:new { align = "top", time,
                 HorizontalSpan:new { width = math.max(0, timew - time:getSize().w) }, text }
             local w, h = ssPair(iw, left, tag)
-            rows[#rows + 1] = { w, h }
+            rows[#rows + 1] = { w, h, ssId(r.id), ssStr(r.text) }
         end
         sections[#sections + 1] = { head = lead, rows = rows }
     end
@@ -4560,6 +4676,7 @@ local function ssCardBody(iw, ih, c, f)
 
     local function fill(reserve)
         local used, out, shown, hidden, stopped = 0, {}, 0, 0, false
+        local rects = {} -- y of every row drawn, off the same measured heights as `used`
         for _, e in ipairs(fixed) do
             out[#out + 1] = e[1]; used = used + e[2]
         end
@@ -4580,6 +4697,7 @@ local function ssCardBody(iw, ih, c, f)
                         if not stopped and used + row_gap + r[2] <= avail then
                             out[#out + 1] = VerticalSpan:new { width = row_gap }
                             out[#out + 1] = r[1]
+                            rects[#rects + 1] = { y = used + row_gap, h = r[2], id = r[3], label = r[4] }
                             used = used + row_gap + r[2]
                             shown = shown + 1
                         else
@@ -4590,14 +4708,28 @@ local function ssCardBody(iw, ih, c, f)
                 end
             end
         end
-        return out, used, shown, hidden
+        return out, used, shown, hidden, rects
     end
 
     local reserve = other_line and (strip_h + strip_gap) or 0
-    local out, used, shown, hidden = fill(reserve)
+    local out, used, shown, hidden, rects = fill(reserve)
     if hidden > 0 and reserve == 0 then
         reserve = strip_h + strip_gap
-        out, used, shown, hidden = fill(reserve)
+        out, used, shown, hidden, rects = fill(reserve)
+    end
+    -- TERAZ hit regions: the row's measured box, stretched by half the gap on
+    -- each side so neighbours touch but never overlap (y2 is exclusive).
+    if hits then
+        for _, r in ipairs(rects) do
+            if r.id ~= nil then
+                hits[#hits + 1] = {
+                    kind = "task", id = r.id, label = r.label,
+                    x1 = ox, x2 = ox + iw,
+                    y1 = oy + r.y - math.floor(row_gap / 2),
+                    y2 = oy + r.y + r.h + math.floor(row_gap / 2),
+                }
+            end
+        end
     end
     local stats = { rows = shown, hidden = hidden, strip = reserve > 0 }
     if reserve > 0 then
@@ -4617,7 +4749,7 @@ end
 --- Sleep screen v3 layout B: the categories as a 2x2 grid of bordered cards
 --- filling grid_h. Landscape or portrait, always two by two.
 --- @return table widget, number height
-local function ssCards(cw, grid_h, cards)
+local function ssCards(cw, grid_h, cards, hits, gx, gy)
     local sp = function(px) return Screen:scaleBySize(px) end
     local gap, bs, pd = sp(10), sp(2), sp(8)
     local card_w = math.floor((cw - gap) / 2)
@@ -4635,7 +4767,11 @@ local function ssCards(cw, grid_h, cards)
             local c = cards[r * 2 + col + 1]
             if col == 1 then table.insert(line, HorizontalSpan:new { width = gap }) end
             local body = VerticalSpan:new { width = ih }
-            if type(c) == "table" then body = ssCardBody(iw, ih, c, f) end
+            if type(c) == "table" then
+                body = ssCardBody(iw, ih, c, f, hits,
+                    (gx or 0) + col * (card_w + gap) + bs + pd,
+                    (gy or 0) + r * (card_h + gap) + bs + pd)
+            end
             table.insert(line, FrameContainer:new {
                 bordersize = bs, radius = sp(8), padding = pd, margin = 0,
                 background = Blitbuffer.COLOR_WHITE,
@@ -4650,8 +4786,15 @@ end
 
 --- @param lock_label string|nil replaces the footer's right-hand text when the
 ---   screen is being held open on purpose (see LockView).
-function ReadingOS:ssWidget(d, stale, lock_label)
+--- @param opts table|nil TERAZ only: { teraz = true, hits = {} (filled with tap
+---   regions in screen coordinates), strip = { prefix, label, time, dim } }.
+---   Adds the X top right and the undo line; the line's height comes out of
+---   the card grid, never out of the type.
+function ReadingOS:ssWidget(d, stale, lock_label, opts)
     local W, H = Screen:getWidth(), Screen:getHeight()
+    local teraz = type(opts) == "table" and opts.teraz == true
+    local hits = teraz and opts.hits or nil
+    if hits then for i = #hits, 1, -1 do hits[i] = nil end end
     local pad = Screen:scaleBySize(14)
     local box = Screen:scaleBySize(2)      -- the page's own frame, design A
     local cw = W - 2 * (pad + box)
@@ -4693,7 +4836,15 @@ function ReadingOS:ssWidget(d, stale, lock_label)
     local head = { date_w, hspan(12), vrule(dh), hspan(12), ssText(clock, f_big) }
     local head_w = 0
     for _, it in ipairs(head) do head_w = head_w + it:getSize().w end
-    local room = cw - batt_w:getSize().w - Screen:scaleBySize(16)
+    local head_right = batt_w
+    local x_w = 0
+    if teraz then
+        -- The one close control every ReadingOS screen shares, top right.
+        local x_icon = icon("close", dh)
+        x_w = x_icon:getSize().w
+        head_right = HorizontalGroup:new { align = "center", batt_w, hspan(14), x_icon }
+    end
+    local room = cw - head_right:getSize().w - Screen:scaleBySize(16)
     local weather = type(d) == "table" and type(d.weather) == "table" and d.weather or nil
     -- Cells drop from the right when the panel runs out of width — wind first,
     -- temperature last. Never a guessed or partial number.
@@ -4713,7 +4864,16 @@ function ReadingOS:ssWidget(d, stale, lock_label)
         for _, it in ipairs({ hspan(14), vrule(dh), hspan(14), cell }) do head[#head + 1] = it end
         head_w = head_w + extra
     end
-    add(ssPair(cw, (strip(head)), batt_w))
+    local head_row, head_row_h = ssPair(cw, (strip(head)), head_right)
+    add(head_row, head_row_h)
+    if hits then
+        -- Generous: nothing else lives in the top 14 px below the header.
+        hits[#hits + 1] = {
+            kind = "close",
+            x1 = W - (pad + box) - x_w - Screen:scaleBySize(36), x2 = W,
+            y1 = 0, y2 = pad + box + head_row_h + Screen:scaleBySize(14),
+        }
+    end
     gap(4)
     add(rule(cw), Screen:scaleBySize(2))
     gap(5)
@@ -4773,7 +4933,32 @@ function ReadingOS:ssWidget(d, stale, lock_label)
     local band, band_h = nil, 0
     if not cards then band, band_h = ssBand(cw, d, get("readingos_ss_lab")) end
     local footer_h = ssText("readingos", f_who):getSize().h + Screen:scaleBySize(1) + Screen:scaleBySize(4)
-    local budget = H - 2 * (pad + box) - used - band_h - footer_h
+    -- TERAZ: "ostatnio ... COFNIJ", always present (dimmed when nothing can be
+    -- undone). Built now so its measured height comes off the card grid.
+    local undo_row, undo_h
+    if teraz and type(opts.strip) == "table" then
+        local st = opts.strip
+        local dim = st.dim == true
+        local btn = FrameContainer:new {
+            bordersize = Screen:scaleBySize(2), radius = Screen:scaleBySize(4),
+            padding = Screen:scaleBySize(4), margin = 0, background = Blitbuffer.COLOR_WHITE,
+            color = dim and Blitbuffer.COLOR_GRAY_5 or nil,
+            ssText("COFNIJ", f_who, dim),
+        }
+        local prefix = ssText(ssStr(st.prefix), f_row, dim)
+        local tm = ssStr(st.time) ~= "" and ssText(ssStr(st.time), f_meta, true) or nil
+        local avail = cw - btn:getSize().w - prefix:getSize().w - Screen:scaleBySize(40)
+            - (tm and tm:getSize().w + Screen:scaleBySize(8) or 0)
+        local left = { prefix }
+        if ssStr(st.label) ~= "" and avail > Screen:scaleBySize(60) then
+            left[#left + 1] = hspan(8)
+            left[#left + 1] = ssText(ssStr(st.label), f_row, dim, avail)
+        end
+        if tm then left[#left + 1] = hspan(8); left[#left + 1] = tm end
+        undo_row, undo_h = ssPair(cw, (strip(left)), btn)
+    end
+    local undo_block = undo_row and (undo_h + Screen:scaleBySize(8)) or 0
+    local budget = H - 2 * (pad + box) - used - band_h - footer_h - undo_block
     local skipped = 0
     -- One column per category, side by side, the way both mockups read it. On a
     -- portrait screen there is no room for that, so the categories stack and the
@@ -4815,9 +5000,21 @@ function ReadingOS:ssWidget(d, stale, lock_label)
 
     if cards then
         local grid_h = budget - Screen:scaleBySize(6)
-        local grid, gh = ssCards(cw, grid_h, cards)
+        local grid, gh = ssCards(cw, grid_h, cards, hits, pad + box, pad + box + used)
         add(grid, gh)
         gap(6)
+        if undo_row then
+            if hits then
+                hits[#hits + 1] = {
+                    kind = "undo",
+                    x1 = math.floor(W / 2), x2 = W,
+                    y1 = pad + box + used - Screen:scaleBySize(4),
+                    y2 = pad + box + used + undo_h + Screen:scaleBySize(4),
+                }
+            end
+            add(undo_row, undo_h)
+            gap(2)
+        end
     elseif #groups == 0 then
         add(ssLine(cw, "nic na dziś", "", f_cat))
         gap(6)
@@ -4858,6 +5055,8 @@ function ReadingOS:ssWidget(d, stale, lock_label)
     local footer_right
     if lock_label then
         footer_right = ssText(lock_label, f_who)
+    elseif teraz then
+        footer_right = ssText("TERAZ", f_who)
     else
         local rtc = tonumber(get("readingos_ss_refresh_rtc")) or 0
         if rtc > 0 then
@@ -4981,10 +5180,18 @@ end
 --   3. the state is never persisted — a reboot always comes up unlocked,
 --   4. the physical power button is untouched (hardware suspend).
 
+-- TERAZ (mode = "teraz") reuses this class: same widget, same keep-awake and
+-- tick, but live and tappable (a task row = done, COFNIJ, X top right) and it
+-- stays up until closed, until readingos_teraz_minutes, or the battery guard.
+-- mode = nil is the lock above and behaves exactly as before.
+
 local LockView = InputContainer:extend {
     plugin = nil,
     data = nil,
     stale = nil,
+    mode = nil,
+    hist = nil,   -- TERAZ: last GET /history payload, nil when offline
+    last = nil,   -- TERAZ: { label, at, undone } of this session's last action
     until_ts = nil,   -- runtime only, deliberately never written to settings
     tick = nil,
 }
@@ -4998,10 +5205,16 @@ function LockView:init()
     -- refuses every command outright while this is on top. The lock screen exists to
     -- hide content until an on-device unlock; a remote command bypassing it from a
     -- merely-paired phone (no on-device proof at command time) would defeat that.
-    self.readingos_screen = "lock"
+    self.teraz = self.mode == "teraz"
+    self.readingos_screen = self.teraz and "teraz" or "lock"
     self.opened_at = os.time()
-    local minutes = math.max(1, tonumber(get("readingos_lock_minutes")) or 30)
-    self.until_ts = os.time() + minutes * 60
+    if self.teraz then
+        local limit = tonumber(get("readingos_teraz_minutes")) or 0
+        self.until_ts = limit > 0 and (os.time() + limit * 60) or nil -- nil = no limit
+    else
+        local minutes = math.max(1, tonumber(get("readingos_lock_minutes")) or 30)
+        self.until_ts = os.time() + minutes * 60
+    end
 
     if Device:isTouchDevice() then
         -- Every gesture is caught and dropped; only onTap looks at where it
@@ -5024,13 +5237,24 @@ function LockView:init()
 
     self:keepAwake()
     self:schedule()
-    self[1] = self.plugin:ssWidget(self.data, self.stale, "\u{1F512}  ODBLOKUJ")
+    self[1] = self:build()
+end
+
+function LockView:build()
+    if self.teraz then
+        self.hits = {}
+        return self.plugin:ssWidget(self.data, self.stale, nil, {
+            teraz = true, hits = self.hits, strip = self.plugin:terazStrip(self.hist, self.last),
+        })
+    end
+    return self.plugin:ssWidget(self.data, self.stale, "\u{1F512}  ODBLOKUJ")
 end
 
 --- The padlock's hit region: the bottom-right corner, where the footer draws
 --- it. Generous on purpose — nothing else on this screen is tappable, so a
 --- sloppy tap costs nothing and a missed unlock costs trust.
 function LockView:onTap(_arg, ges)
+    if self.teraz then return self:terazTap(ges.pos.x, ges.pos.y) end
     if ges.pos.x >= self.dimen.w * 0.6 and ges.pos.y >= self.dimen.h * 0.9 then
         return self:onClose()
     end
@@ -5072,6 +5296,7 @@ function LockView:schedule()
     self.ticks = 0
     self.tick = function()
         if not self.awake then return end -- already closed
+        if self.teraz then return self:terazTick() end
         if os.time() >= (self.until_ts or 0) then
             self:onClose()
             return
@@ -5081,7 +5306,7 @@ function LockView:schedule()
             local data, stale = self.plugin:ssFetch()
             if data then self.data, self.stale = data, stale end
         end
-        self[1] = self.plugin:ssWidget(self.data, self.stale, "\u{1F512}  ODBLOKUJ")
+        self[1] = self:build()
         UIManager:setDirty(self, "ui")
         UIManager:scheduleIn(60, self.tick)
     end
@@ -5091,7 +5316,7 @@ end
 function LockView:onClose()
     if self.tick then UIManager:unschedule(self.tick) end
     self:releaseAwake()
-    track("lock", "close", nil, (os.time() - (self.opened_at or os.time())) * 1000)
+    track(self.teraz and "teraz" or "lock", "close", nil, (os.time() - (self.opened_at or os.time())) * 1000)
     UIManager:close(self)
     return true
 end
@@ -5101,6 +5326,211 @@ function LockView:onCloseWidget()
     self:releaseAwake()
     ssRestoreRotation() -- the book goes back to the orientation it was read in
     UIManager:setDirty(nil, "full")
+end
+
+-- ------------------------------------------------------------------ TERAZ
+
+local OP_WORDS = {
+    done = "zrobione", skip = "pominięte", move = "przeniesione", give = "oddane",
+    archive = "zarchiwizowane", restock = "uzupełnione", card = "fiszka",
+}
+
+--- Which hit region a screen point falls in. Regions are { x1, x2, y1, y2 }
+--- with x2/y2 exclusive, so rows that touch never both claim a point.
+local function terazHit(hits, x, y)
+    for _, h in ipairs(hits or {}) do
+        if x >= h.x1 and x < h.x2 and y >= h.y1 and y < h.y2 then return h end
+    end
+    return nil
+end
+
+--- What the user reads when a write was refused (taskAct's wording).
+local function terazActError(err)
+    if err == "HTTP 409" then return _("Zadanie ma otwarte kroki. Dokończ je w tasksss.") end
+    if err == "HTTP 404" then return _("Zadania już nie ma. Odśwież ekran.") end
+    return _("Nie zapisano — brak połączenia.")
+end
+
+--- GET /api/readingos/history -> { items, undo } or nil (offline / bad body).
+function ReadingOS:fetchHistory()
+    local body, err = request("GET", baseUrl() .. "/api/readingos/history")
+    local data = body and decode(body)
+    if type(data) ~= "table" or type(data.items) ~= "table" then
+        return nil, err
+    end
+    return data
+end
+
+--- The undoable item of a history payload as { label, op, at } or nil. `undo`
+--- may be null (a truthy sentinel table after decode), so it needs a label or
+--- an id that matches a row.
+local function histUndo(hist)
+    local u = type(hist) == "table" and hist.undo
+    if type(u) ~= "table" then return nil end
+    local label, op, at = ssStr(u.label), ssStr(u.op), ssStr(u.at)
+    if label == "" or at == "" then
+        for _, it in ipairs(hist.items or {}) do
+            if u.id ~= nil and it.id == u.id then
+                if label == "" then label = ssStr(it.label) end
+                if op == "" then op = ssStr(it.op) end
+                if at == "" then at = ssStr(it.at) end
+            end
+        end
+    end
+    if label == "" then return nil end
+    return { label = label, op = op, at = at }
+end
+
+--- The TERAZ undo line: { prefix, label, time, dim }. The server's history is
+--- the truth when we have it; offline, this session's own last action.
+function ReadingOS:terazStrip(hist, last)
+    local u = histUndo(hist)
+    if u then
+        local mark = (u.op == "" or u.op == "done") and "\u{2713}" or (OP_WORDS[u.op] or u.op)
+        return { prefix = "ostatnio: " .. mark, label = u.label, time = isoUtcToHM(u.at), dim = false }
+    end
+    if not hist and last and not last.undone then
+        return { prefix = "ostatnio: \u{2713}", label = last.label, time = os.date("%H:%M", last.at), dim = false }
+    end
+    return { prefix = "ostatnio: \u{2014}", label = "", time = "", dim = true }
+end
+
+function LockView:redraw(mode)
+    local old = self[1]
+    self[1] = self:build()
+    if old and old.free then pcall(function() old:free() end) end
+    UIManager:setDirty(self, mode or "ui")
+end
+
+--- Refetch the card payload and the history, battery sample, redraw.
+function LockView:terazRefresh(mode)
+    local data, stale = self.plugin:ssFetch()
+    if data then self.data, self.stale = data, stale end
+    self.hist = self.plugin:fetchHistory()
+    battSample("awake")
+    self:redraw(mode)
+end
+
+function LockView:lowBattery()
+    local ok, cap = pcall(function() return Device:getPowerDevice():getCapacity() end)
+    if not ok or type(cap) ~= "number" then return false end
+    local ok_c, chg = pcall(function() return Device:getPowerDevice():isCharging() end)
+    if ok_c and chg then return false end
+    return cap < (tonumber(get("readingos_ss_min_battery")) or 20)
+end
+
+--- One minute: auto-close, battery guard, and every N minutes a refetch with
+--- a full e-ink refresh (clears ghosting; "ui" is for taps).
+function LockView:terazTick()
+    if self.until_ts and os.time() >= self.until_ts then
+        self:onClose()
+        return
+    end
+    if self:lowBattery() then
+        self:onClose()
+        UIManager:show(InfoMessage:new { text = _("Słaba bateria — TERAZ wyłączony") })
+        return
+    end
+    self.ticks = self.ticks + 1
+    local every = math.max(1, tonumber(get("readingos_teraz_refresh_min")) or 15)
+    if self.ticks % every == 0 then self:terazRefresh("full") end
+    UIManager:scheduleIn(60, self.tick)
+end
+
+function LockView:terazTap(x, y)
+    local now = os.time()
+    -- A queued double tap must not hit the row that slid up into the place of
+    -- the one just finished.
+    if self.busy or now - (self.acted_at or 0) <= 1 then return true end
+    local t = terazHit(self.hits, x, y)
+    if not t then return true end
+    if t.kind == "close" then return self:onClose() end
+    self.busy = true
+    if t.kind == "task" then
+        track("teraz", "done", tostring(t.id))
+        local res, err = self.plugin:act("task", t.id, { op = "done", label = t.label })
+        if res then
+            self.last = { label = t.label, at = os.time() }
+        else
+            UIManager:show(InfoMessage:new { text = terazActError(err) })
+        end
+        -- Refetch even on a refusal: a 404 means the row is already gone.
+        if res or err == "HTTP 404" then self:terazRefresh("ui") end
+    elseif t.kind == "undo" then
+        track("teraz", "undo")
+        local res = self.plugin:act("undo")
+        if res and res.ok then
+            if self.last then self.last.undone = true end
+        else
+            UIManager:show(InfoMessage:new { text = _("Nie da się cofnąć. Za stare, już cofnięte gdzie indziej, albo brak połączenia.") })
+        end
+        self:terazRefresh("ui")
+    end
+    self.acted_at = os.time()
+    self.busy = false
+    return true
+end
+
+--- A power-button sleep closes TERAZ rather than keeping it: the lock is
+--- released before the device suspends, the rotation is restored before the
+--- sleep screen turns the panel itself (the plugin's own onSuspend runs before
+--- Screensaver.show), and nothing can wake into a half-armed screen.
+function LockView:onSuspend()
+    if self.teraz then self:onClose() end
+end
+
+function ReadingOS:showTeraz()
+    local data, stale = self:ssFetch()
+    if not data then
+        UIManager:show(InfoMessage:new {
+            text = _("Brak danych na TERAZ — sprawdź połączenie z serwerem."),
+        })
+        return
+    end
+    track("teraz", "open", stale and "cached" or "fresh")
+    battSample("awake")
+    UIManager:show(LockView:new { plugin = self, data = data, stale = stale,
+        mode = "teraz", hist = self:fetchHistory() }, "full")
+end
+
+-- ----------------------------------------------------------------- HISTORIA
+
+local function historyItems(hist)
+    local rows = {}
+    for _, it in ipairs(hist.items or {}) do rows[#rows + 1] = it end
+    table.sort(rows, function(a, b) return ssStr(a.at) > ssStr(b.at) end) -- newest first
+    local out = {}
+    local u = histUndo(hist)
+    if u then out[#out + 1] = { text = "COFNIJ: " .. u.label, kind = "undo", bold = true } end
+    for _, it in ipairs(rows) do
+        local word = OP_WORDS[ssStr(it.op)] or OP_WORDS[ssStr(it.kind)] or ssStr(it.op)
+        local text = string.format("%s  %s: %s", isoUtcToHM(ssStr(it.at)), word, ssStr(it.label))
+        if it.undone == true then
+            out[#out + 1] = { text = text .. "  (cofnięte)", dim = true }
+        else
+            out[#out + 1] = { text = text, inert = true }
+        end
+    end
+    if #rows == 0 then out[#out + 1] = { text = "Dziś jeszcze nic.", inert = true } end
+    return out
+end
+
+function ReadingOS:showHistory()
+    local hist = self:fetchHistory()
+    if not hist then
+        UIManager:show(InfoMessage:new { text = _("Brak połączenia — historia niedostępna.") })
+        return
+    end
+    self:showList("HISTORIA", historyItems(hist), function(item, menu)
+        if item.kind ~= "undo" then return end
+        track("historia", "undo")
+        local res = self:act("undo")
+        if not (res and res.ok) then
+            UIManager:show(InfoMessage:new { text = _("Nie da się cofnąć. Za stare, już cofnięte gdzie indziej, albo brak połączenia.") })
+        end
+        local fresh = self:fetchHistory()
+        if fresh then menu:switchItemTable("HISTORIA", historyItems(fresh)) end
+    end)
 end
 
 function ReadingOS:showLockScreen()
@@ -5484,6 +5914,7 @@ function ReadingOS:showDashboard()
     end
 
     track("home", "open", age and "cached" or "fresh")
+    battSample("awake")
     UIManager:show(Dashboard:new { data = data, age = age, plugin = self }, "full")
     return true
 end
@@ -5519,6 +5950,7 @@ function ReadingOS:onCloseDocument() self:endSession() end
 -- The level is put back on a real, human resume (onResume below).
 function ReadingOS:onSuspend()
     self:endSession()
+    battSample("suspend")
     if get("readingos_ss_light_off") and Device:hasFrontlight() and not self.saved_frontlight then
         local ok, level = pcall(function() return Device:getPowerDevice():frontlightIntensity() end)
         if ok and type(level) == "number" then
@@ -5531,6 +5963,7 @@ end
 -- An RTC wake is not a resume: it redraws and goes straight back to sleep, so
 -- the light stays off and the RTC task is left in place for the next one.
 function ReadingOS:onResume()
+    battSample("resume")
     if self.simulated_wakeup then
         self.simulated_wakeup = false
         logger.info("ReadingOS: RTC wake, re-suspending in 10 s")
@@ -5704,6 +6137,51 @@ function ReadingOS:settingsItems()
             },
             {
                 text_func = function()
+                    return "TERAZ odświeża co: " ..
+                        (tonumber(get("readingos_teraz_refresh_min")) or 15) .. " min"
+                end,
+                keep_menu_open = true,
+                callback = function(touchmenu)
+                    local choices = { 5, 10, 15, 30, 60 }
+                    local cur, nxt = tonumber(get("readingos_teraz_refresh_min")) or 15, choices[1]
+                    for i, c in ipairs(choices) do
+                        if c == cur then nxt = choices[i % #choices + 1] end
+                    end
+                    set("readingos_teraz_refresh_min", nxt)
+                    if touchmenu then touchmenu:updateItems() end
+                end,
+            },
+            {
+                text_func = function()
+                    local m = tonumber(get("readingos_teraz_minutes")) or 0
+                    return "TERAZ wyłącza się po: " .. (m > 0 and (m .. " min") or "bez limitu")
+                end,
+                keep_menu_open = true,
+                callback = function(touchmenu)
+                    local SpinWidget = require("ui/widget/spinwidget")
+                    UIManager:show(SpinWidget:new {
+                        title_text = _("TERAZ wyłącz po (minut, 0 = bez limitu)"),
+                        value = tonumber(get("readingos_teraz_minutes")) or 0,
+                        value_min = 0,
+                        value_max = 480,
+                        value_step = 15,
+                        callback = function(spin)
+                            set("readingos_teraz_minutes", spin.value)
+                            if touchmenu then touchmenu:updateItems() end
+                        end,
+                    })
+                end,
+            },
+            {
+                text_func = function() return batteryText(batteryDrain(battLoad(), os.time())) end,
+                keep_menu_open = true,
+                callback = function()
+                    UIManager:show(InfoMessage:new { text = batteryText(batteryDrain(battLoad(), os.time())) })
+                end,
+                separator = true,
+            },
+            {
+                text_func = function()
                     return "Pasek LAB (samoloty, ISS): " .. (get("readingos_ss_lab") and "tak" or "nie")
                 end,
                 keep_menu_open = true,
@@ -5812,5 +6290,7 @@ ReadingOS._taskCount = taskCount
 ReadingOS._taskGroups = taskGroups
 ReadingOS._CraftView = CraftView
 ReadingOS._CraftQR = CraftQR
+ReadingOS._LockView = LockView -- test_ss_layout.lua (lock + TERAZ paths)
+ReadingOS._terazHit = terazHit
 
 return ReadingOS
