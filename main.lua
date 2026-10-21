@@ -1174,6 +1174,7 @@ function Dashboard:build()
     local ok_batt, capacity = pcall(function() return Device:getPowerDevice():getCapacity() end)
     local has_batt = ok_batt and type(capacity) == "number"
     local ok_chg, charging = pcall(function() return Device:getPowerDevice():isCharging() end)
+    self.drawn_charging = (ok_chg and charging) and true or false -- onCharging compares against it
     -- ⚡ already renders on the PW3 (sleep-screen header); only while plugged in.
     local batt_text = has_batt and ((ok_chg and charging) and ("\u{26A1}" .. capacity .. "%") or (capacity .. "%")) or "—"
 
@@ -1609,7 +1610,13 @@ end
 
 --- KOReader broadcasts Charging/NotCharging on plug/unplug: rebuild from the
 --- data already held (no request) so the header's ⚡ follows the cable.
-function Dashboard:onCharging()
+--- Only on a real change: build() reads isCharging (a powerd lipc call), and
+--- on the PW3 rebuilding on every event ended in ~120 isCharging reads/s that
+--- froze KOReader (2026-10-21) — powerd apparently answers a read with a fresh
+--- notCharging event. The event name is the state; never read isCharging here.
+function Dashboard:rebuildForCharging(charging)
+    if charging == self.drawn_charging then return end
+    self.drawn_charging = charging -- before build(): an event fired by its own read must match
     local stale_root = self[1]
     self[1] = nil
     if stale_root and stale_root.free then pcall(function() stale_root:free() end) end
@@ -1617,7 +1624,8 @@ function Dashboard:onCharging()
     self[1] = self:build()
     UIManager:setDirty(self, "ui")
 end
-Dashboard.onNotCharging = Dashboard.onCharging
+function Dashboard:onCharging() self:rebuildForCharging(true) end
+function Dashboard:onNotCharging() self:rebuildForCharging(false) end
 
 function Dashboard:onCloseWidget()
     self:cancelRevPoll()
