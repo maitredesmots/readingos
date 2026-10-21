@@ -4786,6 +4786,15 @@ local function ssRestoreRotation()
     Device.orig_rotation_mode = nil
 end
 
+-- The TERAZ view on screen, if any (set in LockView:init, cleared when it
+-- closes). The sleep screen closes it before drawing: TERAZ's own onSuspend
+-- runs only after the sleep page is up, and its rotation restore then turned
+-- that landscape page upright, half drawn over TERAZ (PW3, 2026-10-21).
+local open_teraz = nil
+local function closeOpenTeraz()
+    if open_teraz then open_teraz:onClose() end
+end
+
 --- One category column: JEDZENIE / SPRZĄTANIE / PRADA at the top, owner
 --- sub-sections below it separated by a dashed rule. Leo picked design A's
 --- boxes with design C's split, so the box is the page's own frame and the
@@ -5407,6 +5416,9 @@ function ReadingOS:patchScreensaver()
                 G_reader_settings:saveSetting("screensaver_type", SS_TYPE)
                 return
             end
+            -- TERAZ first: it holds the screen sideways and would turn it
+            -- back after this page is drawn.
+            closeOpenTeraz()
             -- Sideways before the widget is built: every row measures itself
             -- against Screen:getWidth(), which is only 1448 once we are turned.
             ssEnterLandscape()
@@ -5500,6 +5512,7 @@ function LockView:init()
     -- merely-paired phone (no on-device proof at command time) would defeat that.
     self.teraz = self.mode == "teraz"
     self.readingos_screen = self.teraz and "teraz" or "lock"
+    if self.teraz then open_teraz = self end
     self.opened_at = os.time()
     if self.teraz then
         local limit = tonumber(get("readingos_teraz_minutes")) or 0
@@ -5607,6 +5620,8 @@ function LockView:schedule()
 end
 
 function LockView:onClose()
+    if self.closed then return true end -- the sleep screen may have closed it already
+    self.closed = true
     if self.tick then UIManager:unschedule(self.tick) end
     self:releaseAwake()
     track(self.teraz and "teraz" or "lock", "close", nil, (os.time() - (self.opened_at or os.time())) * 1000)
@@ -5615,6 +5630,7 @@ function LockView:onClose()
 end
 
 function LockView:onCloseWidget()
+    if open_teraz == self then open_teraz = nil end
     if self.tick then UIManager:unschedule(self.tick) end
     self:releaseAwake()
     ssRestoreRotation() -- the book goes back to the orientation it was read in
@@ -6606,6 +6622,7 @@ ReadingOS._taskGroups = taskGroups
 ReadingOS._CraftView = CraftView
 ReadingOS._CraftQR = CraftQR
 ReadingOS._LockView = LockView -- test_ss_layout.lua (lock + TERAZ paths)
+ReadingOS._closeOpenTeraz = closeOpenTeraz -- test_ss_layout.lua (sleep closes TERAZ first)
 ReadingOS._terazHit = terazHit
 
 return ReadingOS
