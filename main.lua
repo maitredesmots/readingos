@@ -1531,7 +1531,7 @@ function Dashboard:build()
     add(rule(cw), nav_rule)
     local nav_items = {
         { icon = "close", label = "ZAMKNIJ", target = { kind = "close", label = "close" } },
-        { icon = "cart", label = "ZAKUPY", count = show_counts and shopping.total or nil, target = { screen = "shopping", label = "shopping" } },
+        { icon = "fork", label = "JEDZENIE", count = show_counts and shopping.total or nil, target = { screen = "foood", label = "foood" } },
         { icon = "yarn", label = "CRAFTSSS", target = { screen = "crafts", label = "crafts" } },
         { icon = "home", label = "DOM", count = show_counts and out or nil, target = { screen = "house", label = "house" } },
         { icon = "more", label = "WIĘCEJ", target = { kind = "more", label = "more" } },
@@ -3248,6 +3248,9 @@ function ReadingOS:openScreen(dashboard, screen)
     elseif screen == "tasks" then
         return self:openTasksView(dashboard)
 
+    elseif screen == "foood" then
+        return self:openFoood(dashboard)
+
     elseif screen == "house" then
         local src = d.house or {}
         local items = {}
@@ -3360,6 +3363,499 @@ function ReadingOS:openScreen(dashboard, screen)
         self:showCard(dashboard)
     end
 end
+
+-- ---------------------------------------------------------------- jedzenie
+--
+-- The kitchen screen: what we eat, what to use up, every recipe readable at
+-- the stove. Built to hang on a wall, so: read from across the room (faceFull,
+-- the density setting does not shrink it), refetched every quarter of an hour
+-- while it is open, and kept awake while it is on the charger. Read-only —
+-- Foood is where things are edited. The server sends finished text; this only
+-- lays it out and pages it.
+
+-- One block: main.lua sits at Lua's 200-locals ceiling, so this screen's
+-- locals live in their own scope.
+do
+local FOOOD_CACHE_FILE = DataStorage:getDataDir() .. "/cache/readingos-foood.json"
+local FOOOD_REFRESH_S = 15 * 60
+local FOOOD_TABS = {
+    { key = "today", label = "DZIŚ" },
+    { key = "pantry", label = "SPIŻARNIA" },
+    { key = "recipes", label = "PRZEPISY" },
+    { key = "shopping", label = "ZAKUPY" },
+}
+
+local function fooodPayloadOk(p)
+    return type(p) == "table" and type(p.days) == "table" and type(p.recipes) == "table"
+        and type(p.pantry) == "table"
+end
+
+local function fooodCacheSave(p)
+    util.makePath(DataStorage:getDataDir() .. "/cache/")
+    local encoded = encode({ timestamp = os.time(), data = p })
+    if not encoded then return end
+    local f = io.open(FOOOD_CACHE_FILE, "w")
+    if not f then return end
+    f:write(encoded)
+    f:close()
+end
+
+local function fooodCacheLoad()
+    local f = io.open(FOOOD_CACHE_FILE, "r")
+    if not f then return nil end
+    local content = f:read("*all")
+    f:close()
+    local cached = decode(content)
+    if type(cached) ~= "table" or not fooodPayloadOk(cached.data) then return nil end
+    return cached.data
+end
+
+--- Fresh when online; otherwise the last copy, whatever its age — a recipe
+--- from last week is still the recipe. No request at all without a
+--- connection: request() would block for its socket timeout.
+--- @return table|nil data, boolean offline
+function ReadingOS:fetchFoood()
+    local ok_conn, connected = pcall(function() return NetworkMgr:isConnected() end)
+    if ok_conn and connected then
+        local body, err = request("GET", baseUrl() .. "/api/readingos/foood")
+        local data = body and decode(body)
+        if fooodPayloadOk(data) then
+            fooodCacheSave(data)
+            return data, false
+        end
+        logger.warn("ReadingOS: foood fetch failed:", err or "bad JSON")
+    end
+    return fooodCacheLoad(), true
+end
+
+--- What a refetch compares, so an unchanged quarter-hour costs no e-ink flash.
+local function fooodSignature(p)
+    return encode({ p.days, p.pantry, p.recipes, p.today }) or ""
+end
+
+local FooodView = InputContainer:extend {
+    plugin = nil,
+    dashboard = nil,
+    data = nil,
+    offline = false,
+    tab = "today",
+    page = 1,
+    recipe = nil,    -- an open recipe replaces the tab's list
+    back_page = 1,   -- the list page to return to from a recipe
+}
+
+function FooodView:init()
+    self.opened_at = os.time()
+    self.dimen = Geom:new { x = 0, y = 0, w = Screen:getWidth(), h = Screen:getHeight() }
+    self.covers_fullscreen = true
+    self.readingos_screen = "foood" -- Phone Companion V2: identifies this widget to executeRemoteCommand
+    self.hit = {}
+    self.sig = fooodSignature(self.data)
+    if Device:isTouchDevice() then
+        self.ges_events = {
+            Tap = { GestureRange:new { ges = "tap", range = self.dimen } },
+            Swipe = { GestureRange:new { ges = "swipe", range = self.dimen } },
+        }
+    end
+    self.refresh_cb = function() self:refresh() end
+    UIManager:scheduleIn(FOOOD_REFRESH_S, self.refresh_cb)
+    self:syncAwake()
+    self[1] = self:build()
+end
+
+FooodView.targetAt = Dashboard.targetAt
+
+--- On the charger it is a wall display and stays on; on battery it sleeps as
+--- usual, so a Kindle left on this screen in a bag does not drain flat.
+function FooodView:syncAwake()
+    local ok_c, chg = pcall(function() return Device:getPowerDevice():isCharging() end)
+    local want = ok_c and chg and true or false
+    if want == (self.awake or false) then return end
+    local ok, PluginShare = pcall(require, "pluginshare")
+    if want then
+        if ok and type(PluginShare) == "table" then
+            self.prev_auto_suspend = PluginShare.pause_auto_suspend
+            PluginShare.pause_auto_suspend = true
+        end
+        UIManager:preventStandby()
+    else
+        if ok and type(PluginShare) == "table" then
+            PluginShare.pause_auto_suspend = self.prev_auto_suspend
+        end
+        UIManager:allowStandby()
+    end
+    self.awake = want
+end
+
+function FooodView:onCharging() self:syncAwake() end
+function FooodView:onNotCharging() self:syncAwake() end
+
+function FooodView:refresh()
+    UIManager:scheduleIn(FOOOD_REFRESH_S, self.refresh_cb)
+    self:syncAwake()
+    local data, offline = self.plugin:fetchFoood()
+    if not data then return end
+    local sig = fooodSignature(data)
+    local changed = sig ~= self.sig or offline ~= self.offline
+    self.data, self.offline, self.sig = data, offline, sig
+    if self.recipe then
+        -- the open recipe follows its own update, or stays as it was if gone
+        for _i, r in ipairs(data.recipes) do
+            if r.id == self.recipe.id then self.recipe = r end
+        end
+    end
+    if changed then self:redraw() end
+end
+
+--- Every row of the current tab (or of the open recipe) as { widget,
+--- target?, sticky? }. `sticky` keeps a header on the page of its first row.
+function FooodView:entries(cw)
+    local TextBoxWidget = require("ui/widget/textboxwidget")
+    local gray = Blitbuffer.COLOR_GRAY_5
+    local f_head, f_meta = faceFull(SIZE_HEAD), faceFull(SIZE_META)
+    local f_row, f_big = faceFull(SIZE_ROW), faceFull(SIZE_TITLE)
+    local d = self.data or {}
+    local out = {}
+
+    local function box(text, f, opts)
+        opts = opts or {}
+        return TextBoxWidget:new { text = text, face = f, width = cw, bold = opts.bold,
+            fgcolor = opts.gray and gray or nil }
+    end
+    local function space(px) return VerticalSpan:new { width = Screen:scaleBySize(px) } end
+    local function push(widgets, target, sticky)
+        out[#out + 1] = { widget = VerticalGroup:new { align = "left", unpack(widgets) },
+            target = target, sticky = sticky }
+    end
+    local function header(text)
+        push({ space(14), box(text, f_head, { bold = true }), space(4), rule(cw), space(6) }, nil, true)
+    end
+    local function note(text)
+        push({ space(6), box(text, f_meta, { gray = true }) })
+    end
+    --- A pantry row: what, then why and where on a quieter line.
+    local function item(r)
+        local meta = r.meta or ""
+        if r.where and r.where ~= "" then meta = meta .. " · " .. r.where end
+        push({ box(string.format("%s  %s", r.sym or "●", r.text or ""), f_row), box(meta, f_meta, { gray = true }), space(10) })
+    end
+
+    if self.recipe then
+        local r = self.recipe
+        push({ box(r.title or "", f_big, { bold = true }), space(4) })
+        local meta = r.meta or ""
+        if r.planned then meta = r.planned .. " · " .. meta end
+        if meta ~= "" then push({ box(meta, f_meta, { gray = true }) }) end
+        local ings = type(r.ingredients) == "table" and r.ingredients or {}
+        if #ings > 0 then
+            header(string.format("SKŁADNIKI  (%d)", #ings))
+            for _i, ing in ipairs(ings) do
+                -- missing is what you act on, so it is the one in bold
+                local line = (ing.have and "✓  " or "○  ") .. (ing.text or "")
+                local w = { box(line, f_row, { bold = not ing.have }) }
+                if ing.note then w[#w + 1] = box(ing.note, f_meta, { gray = true }) end
+                w[#w + 1] = space(6)
+                push(w)
+            end
+            if (r.missing or 0) > 0 then note("○ = brak w spiżarni") end
+        end
+        local steps = type(r.steps) == "table" and r.steps or {}
+        if #steps > 0 then
+            header("KROKI")
+            for i, s in ipairs(steps) do
+                push({ box(string.format("%d.  %s", i, s), f_row), space(14) })
+            end
+        end
+        return out
+    end
+
+    if self.tab == "today" then
+        local days = d.days or {}
+        for di, day in ipairs(days) do
+            header(day.label or "")
+            local meals = type(day.meals) == "table" and day.meals or {}
+            if #meals == 0 then note("Nic nie zaplanowano.") end
+            for _i, m in ipairs(meals) do
+                local label = (m.label or ""):upper()
+                local target
+                if m.recipe_id then
+                    label = label .. "  ·  PRZEPIS ›"
+                    target = { kind = "recipe", id = m.recipe_id }
+                end
+                -- today is read from across the room; later days are a preview
+                local w = { box(label, f_meta, { gray = true }), box(m.text or "", di == 1 and f_big or f_row, { bold = di == 1 }) }
+                if di == 1 and m.note then w[#w + 1] = box(m.note, f_meta) end
+                w[#w + 1] = space(12)
+                push(w, target)
+            end
+            local pantry = d.pantry or {}
+            local first = type(pantry.use_first) == "table" and pantry.use_first or {}
+            if di == 1 and #first > 0 then
+                header(string.format("ZUŻYJ NAJPIERW  (%d)", pantry.use_first_total or #first))
+                for k = 1, math.min(3, #first) do item(first[k]) end
+                if #first > 3 then
+                    push({ box("więcej w SPIŻARNI ›", f_meta, { bold = true }), space(6) }, { kind = "tab", tab = "pantry" })
+                end
+            end
+        end
+        if #days == 0 then note("Brak planu.") end
+
+    elseif self.tab == "pantry" then
+        local p = d.pantry or {}
+        local first = type(p.use_first) == "table" and p.use_first or {}
+        local low = type(p.low) == "table" and p.low or {}
+        header(string.format("ZUŻYJ NAJPIERW  (%d)", p.use_first_total or #first))
+        if #first == 0 then note("Nic się nie psuje.") end
+        for _i, r in ipairs(first) do item(r) end
+        if (p.use_first_total or 0) > #first then note(string.format("+%d w Foood", p.use_first_total - #first)) end
+        header(string.format("KOŃCZY SIĘ  (%d)", p.low_total or #low))
+        if #low == 0 then note("Niczego nie brakuje.") end
+        for _i, r in ipairs(low) do item(r) end
+        if (p.low_total or 0) > #low then note(string.format("+%d w Foood", p.low_total - #low)) end
+        note(string.format("W spiżarni: %d pozycji.", p.total or 0))
+
+    elseif self.tab == "recipes" then
+        local planned_done = false
+        local any_planned = false
+        for _i, r in ipairs(d.recipes or {}) do
+            if r.planned and not any_planned then header("W PLANIE"); any_planned = true end
+            if not r.planned and not planned_done then
+                header(any_planned and "POZOSTAŁE" or "WSZYSTKIE")
+                planned_done = true
+            end
+            local meta = r.meta or ""
+            if r.planned then meta = r.planned .. (meta ~= "" and " · " .. meta or "") end
+            push({ box((r.title or "") .. "  ›", f_row), box(meta, f_meta, { gray = true }), space(10) },
+                { kind = "recipe", id = r.id })
+        end
+        if #(d.recipes or {}) == 0 then note("Brak przepisów.") end
+
+    elseif self.tab == "shopping" then
+        local names = (((self.dashboard or {}).data or {}).shopping or {}).items or {}
+        header(string.format("DO KUPIENIA  (%d)", #names))
+        if #names == 0 then note("Lista pusta.") end
+        for _i, n in ipairs(names) do push({ box("•  " .. tostring(n), f_row), space(8) }) end
+    end
+    return out
+end
+
+--- Splits entries into pages that fit `avail` px; a sticky header never ends a page.
+local function fooodPages(entries, avail)
+    local pages, cur, used = {}, {}, 0
+    for i, e in ipairs(entries) do
+        local h = e.widget:getSize().h
+        local need = h
+        if e.sticky and entries[i + 1] then need = need + entries[i + 1].widget:getSize().h end
+        if #cur > 0 and used + need > avail then
+            pages[#pages + 1] = cur
+            cur, used = {}, 0
+        end
+        cur[#cur + 1] = e
+        used = used + h
+    end
+    if #cur > 0 then pages[#pages + 1] = cur end
+    if #pages == 0 then pages[1] = {} end
+    return pages
+end
+
+function FooodView:build()
+    self.hit = {}
+    local W, H = Screen:getWidth(), Screen:getHeight()
+    local pad = Screen:scaleBySize(18)
+    local cw = W - 2 * pad
+    local bord = Screen:scaleBySize(1)
+    local gray = Blitbuffer.COLOR_GRAY_5
+    local f_head, f_meta = faceFull(SIZE_HEAD), faceFull(SIZE_META)
+    local h_head = math.max(MIN_TAP, Screen:scaleBySize(SIZE_HEAD * 2.2))
+    local tab_h = math.max(MIN_TAP, Screen:scaleBySize(SIZE_META * 2.6))
+    local pager_h = MIN_TAP
+    local out, y = {}, pad
+
+    local function add(widget, target)
+        out[#out + 1] = widget
+        local h = widget:getSize().h
+        if target then
+            target.y1, target.y2 = y, y + h
+            self.hit[#self.hit + 1] = target
+        end
+        y = y + h
+    end
+    local function gap(px)
+        out[#out + 1] = VerticalSpan:new { width = px }
+        y = y + px
+    end
+
+    -- header: where you are, how fresh it is, and the X every screen has
+    local d = self.data or {}
+    local stamp = isoUtcToHM(d.generated_at or "") or ""
+    if self.offline then stamp = "offline · " .. stamp end
+    if self.recipe then
+        local back_label = "‹  PRZEPISY"
+        for _i, t in ipairs(FOOOD_TABS) do
+            if t.key == self.tab then back_label = "‹  " .. t.label end
+        end
+        add(lrRow(cw, h_head, back_label, stamp, f_head, f_meta, true, false), { kind = "back" })
+    else
+        add(lrRow(cw, h_head, "JEDZENIE", stamp, f_head, f_meta, true, true), { kind = "close" })
+    end
+    add(rule(cw))
+
+    if not self.recipe then
+        -- tabs: four equal cells, the chosen one black
+        gap(Screen:scaleBySize(8))
+        local seg = math.floor(cw / #FOOOD_TABS)
+        local row = HorizontalGroup:new {}
+        for i, t in ipairs(FOOOD_TABS) do
+            local sel = t.key == self.tab
+            table.insert(row, FrameContainer:new { bordersize = bord, padding = 0, margin = 0, radius = 0,
+                background = sel and Blitbuffer.COLOR_BLACK or nil,
+                CenterContainer:new { dimen = Geom:new { w = seg - 2 * bord, h = tab_h - 2 * bord },
+                    TextWidget:new { text = t.label, face = f_meta, bold = true, max_width = seg - 2 * bord,
+                        fgcolor = sel and Blitbuffer.COLOR_WHITE or nil } } })
+            self.hit[#self.hit + 1] = { kind = "tab", tab = t.key, x1 = pad + (i - 1) * seg, x2 = pad + i * seg,
+                y1 = y, y2 = y + tab_h }
+        end
+        out[#out + 1] = row
+        y = y + tab_h
+    end
+
+    local entries = self:entries(cw)
+    local avail = H - pad - y - pager_h - Screen:scaleBySize(8)
+    local pages = fooodPages(entries, avail)
+    if self.page > #pages then self.page = #pages end
+    self.pages = #pages
+    local shown = {}
+    for _i, e in ipairs(pages[self.page]) do
+        shown[e] = true
+        add(e.widget, e.target)
+    end
+    for _i, e in ipairs(entries) do
+        if not shown[e] and e.widget.free then pcall(function() e.widget:free() end) end
+    end
+
+    -- pager, pinned to the bottom; absent when everything fits on one page
+    if #pages > 1 then
+        local spacer = H - pad - pager_h - Screen:scaleBySize(4) - y
+        if spacer > 0 then gap(spacer) end
+        add(rule(cw))
+        local third = math.floor(cw / 3)
+        local function cell(s, enabled)
+            return CenterContainer:new { dimen = Geom:new { w = third, h = pager_h },
+                TextWidget:new { text = s, face = f_meta, bold = enabled, fgcolor = not enabled and gray or nil } }
+        end
+        local top = y
+        add(HorizontalGroup:new {
+            cell("‹  POPRZEDNIA", self.page > 1),
+            cell(string.format("%d / %d", self.page, #pages), false),
+            cell("NASTĘPNA  ›", self.page < #pages),
+        })
+        if self.page > 1 then
+            self.hit[#self.hit + 1] = { kind = "page", delta = -1, x1 = pad, x2 = pad + third, y1 = top, y2 = y }
+        end
+        if self.page < #pages then
+            self.hit[#self.hit + 1] = { kind = "page", delta = 1, x1 = pad + 2 * third, x2 = pad + cw, y1 = top, y2 = y }
+        end
+    end
+
+    return FrameContainer:new {
+        background = Blitbuffer.COLOR_WHITE, bordersize = 0, padding = pad,
+        width = W, height = H,
+        VerticalGroup:new { align = "left", unpack(out) },
+    }
+end
+
+function FooodView:redraw()
+    local old = self[1]
+    self[1] = nil
+    if old and old.free then pcall(function() old:free() end) end
+    self[1] = self:build()
+    UIManager:setDirty(self, "ui")
+end
+
+function FooodView:openRecipe(id)
+    for _i, r in ipairs((self.data or {}).recipes or {}) do
+        if r.id == id then
+            track("jedzenie", "recipe", tostring(id))
+            self.recipe, self.back_page, self.page = r, self.page, 1
+            return self:redraw()
+        end
+    end
+end
+
+function FooodView:back()
+    if not self.recipe then return self:onClose() end
+    self.recipe, self.page = nil, self.back_page or 1
+    self:redraw()
+    return true
+end
+
+function FooodView:onTap(_arg, ges)
+    local t = self:targetAt(ges.pos.x, ges.pos.y)
+    if not t then return true end
+    if t.kind == "close" then return self:onClose() end
+    if t.kind == "back" then return self:back() end
+    if t.kind == "page" then return t.delta > 0 and self:onNextPage() or self:onPrevPage() end
+    if t.kind == "recipe" then self:openRecipe(t.id); return true end
+    if t.kind == "tab" then
+        if t.tab ~= self.tab then
+            track("jedzenie", "tab", t.tab)
+            self.tab, self.page = t.tab, 1
+            self:redraw()
+        end
+        return true
+    end
+    return true
+end
+
+function FooodView:onSwipe(_arg, ges)
+    if ges.direction == "west" then return self:onNextPage() end
+    if ges.direction == "east" then
+        if self.page > 1 then return self:onPrevPage() end
+        return self:back()
+    end
+    return true
+end
+
+function FooodView:onNextPage()
+    if self.page < (self.pages or 1) then self.page = self.page + 1; self:redraw() end
+    return true
+end
+
+function FooodView:onPrevPage()
+    if self.page > 1 then self.page = self.page - 1; self:redraw() end
+    return true
+end
+
+function FooodView:onClose()
+    track("jedzenie", "back", nil, (os.time() - (self.opened_at or os.time())) * 1000)
+    UIManager:close(self)
+    return true
+end
+
+function FooodView:onCloseWidget()
+    UIManager:unschedule(self.refresh_cb)
+    if self.awake then
+        local ok, PluginShare = pcall(require, "pluginshare")
+        if ok and type(PluginShare) == "table" then PluginShare.pause_auto_suspend = self.prev_auto_suspend end
+        UIManager:allowStandby()
+        self.awake = false
+    end
+    UIManager:setDirty(nil, "full")
+end
+
+function ReadingOS:openFoood(dashboard)
+    local data, offline = self:fetchFoood()
+    if not data then
+        track("jedzenie", "open", "no data")
+        UIManager:show(InfoMessage:new { text = _("Brak danych o jedzeniu. Połącz się z Wi-Fi i spróbuj jeszcze raz.") })
+        return
+    end
+    track("jedzenie", "open", offline and "offline" or nil)
+    UIManager:show(FooodView:new { plugin = self, dashboard = dashboard, data = data, offline = offline }, "full")
+end
+ReadingOS._FooodView = FooodView -- test_foood_layout.lua
+ReadingOS._fooodPages = fooodPages
+end -- jedzenie
 
 -- ------------------------------------------------------------------- learn
 --
