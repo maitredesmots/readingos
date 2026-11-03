@@ -3509,61 +3509,148 @@ end
 
 --- Every row of the current tab (or of the open recipe) as { widget,
 --- target?, sticky? }. `sticky` keeps a header on the page of its first row.
-function FooodView:entries(cw)
+-- ---- type: three reading distances, each with its own A−/A+
+--
+-- DZIŚ is read from across the kitchen, the lists are scanned at arm's
+-- length, a recipe is read over a pot. One size cannot serve all three, so
+-- each remembers its own step. Sizes go through faceFull (PW3-tuned by eye
+-- on 2026-11-03: the recipe size is right at the stove, the others smaller).
+local FOOOD_FONT_MIN, FOOOD_FONT_MAX = -2, 3
+local FOOOD_SIZES = {
+    today = { big = 13, row = 11, small = 10 }, -- a five-meal day on one page
+    lists = { big = 13, row = 13, small = 11 },
+    recipe = { big = 19, row = 16, small = 12 },
+}
+
+-- a no-break space keeps the chevron on the title's last line
+local NBSP_CHEVRON = "\u{00A0}\u{00A0}›"
+
+local function fooodSteps()
+    local s = get("readingos_foood_font")
+    return type(s) == "table" and s or {}
+end
+
+--- string.upper is bytewise: it would leave "DRUGIE śNIADANIE".
+local PL_UPPER = { ["ą"] = "Ą", ["ć"] = "Ć", ["ę"] = "Ę", ["ł"] = "Ł", ["ń"] = "Ń",
+    ["ó"] = "Ó", ["ś"] = "Ś", ["ź"] = "Ź", ["ż"] = "Ż" }
+local function plUpper(s)
+    return (tostring(s or ""):upper():gsub("[\195\196\197][\128-\191]", function(c) return PL_UPPER[c] or c end))
+end
+
+function FooodView:fontKind()
+    if self.recipe then return "recipe" end
+    return self.tab == "today" and "today" or "lists"
+end
+
+function FooodView:fontStep()
+    return tonumber(fooodSteps()[self:fontKind()]) or 0
+end
+
+function FooodView:setFontStep(delta)
+    local steps = fooodSteps()
+    local kind = self:fontKind()
+    local n = math.max(FOOOD_FONT_MIN, math.min(FOOOD_FONT_MAX, (tonumber(steps[kind]) or 0) + delta))
+    if n == (tonumber(steps[kind]) or 0) then return end
+    steps[kind] = n
+    set("readingos_foood_font", steps)
+    track("jedzenie", "font", kind .. " " .. n)
+    self.page = 1
+    self:redraw()
+end
+
+--- The faces for the current view at its current step.
+function FooodView:faces()
+    local base = FOOOD_SIZES[self:fontKind()]
+    local k = 1 + 0.15 * self:fontStep()
+    local function sz(n) return math.max(7, math.floor(n * k + 0.5)) end
+    return { big = faceFull(sz(base.big)), row = faceFull(sz(base.row)), small = faceFull(sz(base.small)),
+        head = faceFull(sz(base.small + 1)) }
+end
+
+--- Every row of the current tab (or of the open recipe) as { widget,
+--- target?, sticky? } at inner width `iw`. `sticky` keeps a header on the
+--- page of its first row. Hierarchy is weight and size, not light gray:
+--- thin gray strokes are what breaks up first on e-ink, so secondary text
+--- is a dark gray at a smaller size, never a pale one.
+function FooodView:entries(iw)
     local TextBoxWidget = require("ui/widget/textboxwidget")
-    local gray = Blitbuffer.COLOR_GRAY_5
-    local f_head, f_meta = faceFull(SIZE_HEAD), faceFull(SIZE_META)
-    local f_row, f_big = faceFull(SIZE_ROW), faceFull(SIZE_TITLE)
+    local soft = Blitbuffer.COLOR_GRAY_3
+    local f = self:faces()
     local d = self.data or {}
     local out = {}
+    local col_gap = Screen:scaleBySize(12)
 
-    local function box(text, f, opts)
+    local function box(text, face, w, opts)
         opts = opts or {}
-        return TextBoxWidget:new { text = text, face = f, width = cw, bold = opts.bold,
-            fgcolor = opts.gray and gray or nil }
+        return TextBoxWidget:new { text = text, face = face, width = w or iw, bold = opts.bold,
+            alignment = opts.right and "right" or nil, fgcolor = opts.soft and soft or nil }
     end
     local function space(px) return VerticalSpan:new { width = Screen:scaleBySize(px) } end
     local function push(widgets, target, sticky)
         out[#out + 1] = { widget = VerticalGroup:new { align = "left", unpack(widgets) },
             target = target, sticky = sticky }
     end
-    local function header(text)
-        push({ space(14), box(text, f_head, { bold = true }), space(4), rule(cw), space(6) }, nil, true)
+    --- Two columns, top-aligned: a fixed left (label, number) and the rest.
+    local function cols(left_w, left, right)
+        return HorizontalGroup:new { align = "top", left, HorizontalSpan:new { width = col_gap }, right }
+    end
+    --- A section: caps on the left, a count or status on the right, a rule.
+    local function header(text, right, first)
+        local l = TextWidget:new { text = plUpper(text), face = f.head, bold = true, max_width = math.floor(iw * 0.7) }
+        local r = right and right ~= "" and TextWidget:new { text = right, face = f.small, fgcolor = soft,
+            max_width = math.floor(iw * 0.4) } or nil
+        -- measured before the group exists: an OverlapGroup sizes itself at
+        -- init, and one born 0 px tall let the next row draw over the header
+        local rh = l:getSize().h
+        local row = OverlapGroup:new { dimen = Geom:new { w = iw, h = rh },
+            LeftContainer:new { dimen = Geom:new { w = iw, h = rh }, l } }
+        if r then table.insert(row, RightContainer:new { dimen = Geom:new { w = iw, h = rh }, r }) end
+        push({ space(first and 0 or 18), row, space(4), rule(iw), space(10) }, nil, true)
     end
     local function note(text)
-        push({ space(6), box(text, f_meta, { gray = true }) })
-    end
-    --- A pantry row: what, then why and where on a quieter line.
-    local function item(r)
-        local meta = r.meta or ""
-        if r.where and r.where ~= "" then meta = meta .. " · " .. r.where end
-        push({ box(string.format("%s  %s", r.sym or "●", r.text or ""), f_row), box(meta, f_meta, { gray = true }), space(10) })
+        push({ box(text, f.small, nil, { soft = true }), space(8) })
     end
 
     if self.recipe then
         local r = self.recipe
-        push({ box(r.title or "", f_big, { bold = true }), space(4) })
+        push({ box(r.title or "", f.big, nil, { bold = true }), space(6) })
         local meta = r.meta or ""
         if r.planned then meta = r.planned .. " · " .. meta end
-        if meta ~= "" then push({ box(meta, f_meta, { gray = true }) }) end
+        if meta ~= "" then push({ box(meta, f.small, nil, { soft = true }), space(4) }) end
         local ings = type(r.ingredients) == "table" and r.ingredients or {}
         if #ings > 0 then
-            header(string.format("SKŁADNIKI  (%d)", #ings))
+            header("Składniki", (r.missing or 0) > 0 and string.format("○ brakuje %d", r.missing) or "wszystko jest")
+            -- wide enough for ○ at the stove size and at A+3 (PW3: at 16 the
+            -- glyph did not fit and the box drew nothing)
+            local mark_w = math.ceil(f.row.size * 1.1)
+            local amt_w = math.floor(iw * 0.3)
+            local name_w = iw - mark_w - amt_w - 2 * col_gap
             for _i, ing in ipairs(ings) do
-                -- missing is what you act on, so it is the one in bold
-                local line = (ing.have and "✓  " or "○  ") .. (ing.text or "")
-                local w = { box(line, f_row, { bold = not ing.have }) }
-                if ing.note then w[#w + 1] = box(ing.note, f_meta, { gray = true }) end
-                w[#w + 1] = space(6)
+                -- "name — amount" → name left, amount right-aligned in its own column
+                local text = ing.text or ""
+                local name, amount = text:match("^(.-) — (.+)$")
+                name, amount = name or text, amount or ""
+                local strong = not ing.have -- missing is what you act on
+                local row = HorizontalGroup:new { align = "top",
+                    box(ing.have and "✓" or "○", f.row, mark_w),
+                    HorizontalSpan:new { width = col_gap },
+                    box(name, f.row, name_w, { bold = strong }),
+                    HorizontalSpan:new { width = col_gap },
+                    box(amount, f.row, amt_w, { right = true, bold = strong }),
+                }
+                local w = { row }
+                if ing.note then w[#w + 1] = box(ing.note, f.small, nil, { soft = true }) end
+                w[#w + 1] = space(8)
                 push(w)
             end
-            if (r.missing or 0) > 0 then note("○ = brak w spiżarni") end
         end
         local steps = type(r.steps) == "table" and r.steps or {}
         if #steps > 0 then
-            header("KROKI")
+            header("Przygotowanie", string.format("%d kroków", #steps))
+            local num_w = Screen:scaleBySize(26)
             for i, s in ipairs(steps) do
-                push({ box(string.format("%d.  %s", i, s), f_row), space(14) })
+                push({ cols(num_w, box(tostring(i), f.row, num_w, { bold = true }), box(s, f.row, iw - num_w - col_gap)),
+                    space(14) })
             end
         end
         return out
@@ -3571,70 +3658,101 @@ function FooodView:entries(cw)
 
     if self.tab == "today" then
         local days = d.days or {}
+        local label_w = math.floor(iw * 0.29) -- "PODWIECZOREK" in one piece
+        local text_w = iw - label_w - col_gap
         for di, day in ipairs(days) do
-            header(day.label or "")
             local meals = type(day.meals) == "table" and day.meals or {}
+            header(day.label or "", di == 1 and string.format("%d posiłków", #meals) or nil, di == 1)
             if #meals == 0 then note("Nic nie zaplanowano.") end
             for _i, m in ipairs(meals) do
-                local label = (m.label or ""):upper()
-                local target
-                if m.recipe_id then
-                    label = label .. "  ·  PRZEPIS ›"
-                    target = { kind = "recipe", id = m.recipe_id }
+                -- a menu card: when on the left, what in bold on the right;
+                -- today is read from across the room, later days are a preview
+                local text, note = m.text or "", m.note
+                if di == 1 and not m.recipe_id and not note then
+                    -- a free-text entry is often a paragraph: its first phrase
+                    -- is the dish, the rest is the kind of hint a note is
+                    local head, sep, rest = text:match("^(.-[^%d])([%.,;(]) *(.+)$")
+                    if head and #head >= 12 and #text > 48 then
+                        text, note = head, (sep == "(" and "(" or "") .. rest
+                    end
                 end
-                -- today is read from across the room; later days are a preview
-                local w = { box(label, f_meta, { gray = true }), box(m.text or "", di == 1 and f_big or f_row, { bold = di == 1 }) }
-                if di == 1 and m.note then w[#w + 1] = box(m.note, f_meta) end
-                w[#w + 1] = space(12)
-                push(w, target)
+                local title = text .. (m.recipe_id and NBSP_CHEVRON or "")
+                local right = { box(title, di == 1 and f.big or f.row, text_w, { bold = di == 1 }) }
+                if di == 1 and note then
+                    -- one line: on the wall it is a hint; the recipe has room
+                    right[#right + 1] = space(2)
+                    right[#right + 1] = TextWidget:new { text = note, face = f.small, fgcolor = soft, max_width = text_w }
+                end
+                push({ cols(label_w, box(plUpper(m.label or ""), f.small, label_w, { soft = true }),
+                        VerticalGroup:new { align = "left", unpack(right) }),
+                    space(di == 1 and 14 or 8) },
+                    m.recipe_id and { kind = "recipe", id = m.recipe_id } or nil)
             end
             local pantry = d.pantry or {}
             local first = type(pantry.use_first) == "table" and pantry.use_first or {}
             if di == 1 and #first > 0 then
-                header(string.format("ZUŻYJ NAJPIERW  (%d)", pantry.use_first_total or #first))
-                for k = 1, math.min(3, #first) do item(first[k]) end
-                if #first > 3 then
-                    push({ box("więcej w SPIŻARNI ›", f_meta, { bold = true }), space(6) }, { kind = "tab", tab = "pantry" })
+                header("Zużyj najpierw", string.format("%d  ›", pantry.use_first_total or #first))
+                -- three short lines: on the wall this is a nudge, SPIŻARNIA has the rest
+                local lines = {}
+                for k = 1, math.min(3, #first) do
+                    lines[#lines + 1] = TextWidget:new { text = string.format("%s  %s", first[k].sym or "●", first[k].text or ""),
+                        face = f.row, max_width = iw }
                 end
+                lines[#lines + 1] = space(6)
+                push(lines, { kind = "tab", tab = "pantry" })
             end
         end
         if #days == 0 then note("Brak planu.") end
 
     elseif self.tab == "pantry" then
         local p = d.pantry or {}
+        local meta_w = math.floor(iw * 0.34)
+        local name_w = iw - meta_w - col_gap
+        --- A pantry row: what on the left; why and where right-aligned.
+        local function item(r)
+            push({ cols(name_w, box(string.format("%s  %s", r.sym or "●", r.text or ""), f.row, name_w),
+                    VerticalGroup:new { align = "right",
+                        box(r.meta or "", f.small, meta_w, { right = true, bold = r.sym == "▲" }),
+                        box(r.where or "", f.small, meta_w, { right = true, soft = true }) }),
+                space(10) })
+        end
         local first = type(p.use_first) == "table" and p.use_first or {}
         local low = type(p.low) == "table" and p.low or {}
-        header(string.format("ZUŻYJ NAJPIERW  (%d)", p.use_first_total or #first))
+        header("Zużyj najpierw", tostring(p.use_first_total or #first), true)
         if #first == 0 then note("Nic się nie psuje.") end
         for _i, r in ipairs(first) do item(r) end
         if (p.use_first_total or 0) > #first then note(string.format("+%d w Foood", p.use_first_total - #first)) end
-        header(string.format("KOŃCZY SIĘ  (%d)", p.low_total or #low))
+        header("Kończy się", tostring(p.low_total or #low))
         if #low == 0 then note("Niczego nie brakuje.") end
         for _i, r in ipairs(low) do item(r) end
         if (p.low_total or 0) > #low then note(string.format("+%d w Foood", p.low_total - #low)) end
-        note(string.format("W spiżarni: %d pozycji.", p.total or 0))
+        push({ space(10), box(string.format("W spiżarni %d pozycji.", p.total or 0), f.small, nil, { soft = true }) })
 
     elseif self.tab == "recipes" then
-        local planned_done = false
-        local any_planned = false
+        local section
         for _i, r in ipairs(d.recipes or {}) do
-            if r.planned and not any_planned then header("W PLANIE"); any_planned = true end
-            if not r.planned and not planned_done then
-                header(any_planned and "POZOSTAŁE" or "WSZYSTKIE")
-                planned_done = true
+            local want = r.planned and "W planie" or "Książka"
+            if want ~= section then
+                header(want, nil, section == nil)
+                section = want
             end
             local meta = r.meta or ""
-            if r.planned then meta = r.planned .. (meta ~= "" and " · " .. meta or "") end
-            push({ box((r.title or "") .. "  ›", f_row), box(meta, f_meta, { gray = true }), space(10) },
-                { kind = "recipe", id = r.id })
+            local w = { box((r.title or "") .. NBSP_CHEVRON, f.row) }
+            if r.planned then
+                w[#w + 1] = box(r.planned .. (meta ~= "" and " · " .. meta or ""), f.small, nil, { soft = true })
+            elseif meta ~= "" then
+                w[#w + 1] = box(meta, f.small, nil, { soft = true })
+            end
+            w[#w + 1] = space(10)
+            push(w, { kind = "recipe", id = r.id })
         end
         if #(d.recipes or {}) == 0 then note("Brak przepisów.") end
 
     elseif self.tab == "shopping" then
         local names = (((self.dashboard or {}).data or {}).shopping or {}).items or {}
-        header(string.format("DO KUPIENIA  (%d)", #names))
+        header("Do kupienia", tostring(#names), true)
         if #names == 0 then note("Lista pusta.") end
-        for _i, n in ipairs(names) do push({ box("•  " .. tostring(n), f_row), space(8) }) end
+        for _i, n in ipairs(names) do push({ box("•  " .. tostring(n), f.row), space(8) }) end
     end
     return out
 end
@@ -3664,45 +3782,69 @@ function FooodView:build()
     local pad = Screen:scaleBySize(18)
     local cw = W - 2 * pad
     local bord = Screen:scaleBySize(1)
-    local gray = Blitbuffer.COLOR_GRAY_5
-    local f_head, f_meta = faceFull(SIZE_HEAD), faceFull(SIZE_META)
-    local h_head = math.max(MIN_TAP, Screen:scaleBySize(SIZE_HEAD * 2.2))
+    local ipad = Screen:scaleBySize(14)
+    local iw = cw - 2 * (bord + ipad)
+    local soft = Blitbuffer.COLOR_GRAY_3
+    local f_bar, f_bar_b = faceFull(SIZE_META), faceFull(SIZE_HEAD)
+    local bar_h = math.max(MIN_TAP, Screen:scaleBySize(40))
     local tab_h = math.max(MIN_TAP, Screen:scaleBySize(SIZE_META * 2.6))
-    local pager_h = MIN_TAP
+    local pager_h = math.max(MIN_TAP, Screen:scaleBySize(34))
     local out, y = {}, pad
 
-    local function add(widget, target)
+    local function add(widget, h)
         out[#out + 1] = widget
-        local h = widget:getSize().h
-        if target then
-            target.y1, target.y2 = y, y + h
-            self.hit[#self.hit + 1] = target
-        end
-        y = y + h
+        y = y + (h or widget:getSize().h)
     end
     local function gap(px)
         out[#out + 1] = VerticalSpan:new { width = px }
         y = y + px
     end
+    local function vline(h)
+        return LineWidget:new { background = Blitbuffer.COLOR_BLACK, dimen = Geom:new { w = bord, h = h } }
+    end
 
-    -- header: where you are, how fresh it is, and the X every screen has
+    -- ---- bar: the dashboard's boxed header. [× or ‹] [title] [A−] [A+] [time]
     local d = self.data or {}
     local stamp = isoUtcToHM(d.generated_at or "") or ""
-    if self.offline then stamp = "offline · " .. stamp end
-    if self.recipe then
-        local back_label = "‹  PRZEPISY"
-        for _i, t in ipairs(FOOOD_TABS) do
-            if t.key == self.tab then back_label = "‹  " .. t.label end
-        end
-        add(lrRow(cw, h_head, back_label, stamp, f_head, f_meta, true, false), { kind = "back" })
-    else
-        add(lrRow(cw, h_head, "JEDZENIE", stamp, f_head, f_meta, true, true), { kind = "close" })
+    if self.offline then stamp = "offline " .. stamp end
+    local step = self:fontStep()
+    local lead_w = math.floor(bar_h * 1.25)
+    local font_w = math.floor(bar_h * 1.25)
+    local time_w = Screen:scaleBySize(self.offline and 120 or 70)
+    local title_w = cw - 2 * bord - lead_w - 2 * font_w - time_w - 4 * bord
+    local inner_h = bar_h - 2 * bord
+    local function cell(w, widget) return CenterContainer:new { dimen = Geom:new { w = w, h = inner_h }, widget } end
+    local lead = self.recipe and TextWidget:new { text = "‹", face = faceFull(SIZE_TITLE), bold = true }
+        or icon("close", math.floor(inner_h * 0.5))
+    local title = self.recipe and plUpper(self:tabLabel()) or "JEDZENIE"
+    local bar = FrameContainer:new { bordersize = bord, padding = 0, margin = 0, radius = 0,
+        HorizontalGroup:new { align = "center",
+            cell(lead_w, lead), vline(inner_h),
+            LeftContainer:new { dimen = Geom:new { w = title_w, h = inner_h },
+                HorizontalGroup:new { HorizontalSpan:new { width = Screen:scaleBySize(12) },
+                    TextWidget:new { text = title, face = f_bar_b, bold = true, max_width = title_w - Screen:scaleBySize(16) } } },
+            vline(inner_h),
+            cell(font_w, TextWidget:new { text = "A−", face = faceFull(SIZE_META), bold = true,
+                fgcolor = step <= FOOOD_FONT_MIN and Blitbuffer.COLOR_GRAY_9 or nil }), vline(inner_h),
+            cell(font_w, TextWidget:new { text = "A+", face = faceFull(SIZE_HEAD), bold = true,
+                fgcolor = step >= FOOOD_FONT_MAX and Blitbuffer.COLOR_GRAY_9 or nil }), vline(inner_h),
+            cell(time_w, TextWidget:new { text = stamp, face = f_bar, fgcolor = soft, max_width = time_w }),
+        } }
+    local x0 = pad + bord
+    local function hitX(x1, x2, target)
+        target.x1, target.x2, target.y1, target.y2 = x1, x2, y, y + bar_h
+        self.hit[#self.hit + 1] = target
     end
-    add(rule(cw))
+    hitX(pad, x0 + lead_w, { kind = self.recipe and "back" or "close" })
+    local xa = x0 + lead_w + bord + title_w + bord
+    if self.recipe then hitX(x0 + lead_w, xa, { kind = "back" }) end
+    hitX(xa, xa + font_w, { kind = "font", delta = -1 })
+    hitX(xa + font_w + bord, xa + 2 * font_w + bord, { kind = "font", delta = 1 })
+    add(bar, bar_h)
+    gap(Screen:scaleBySize(10))
 
+    -- ---- tabs: one segmented control, the chosen one black
     if not self.recipe then
-        -- tabs: four equal cells, the chosen one black
-        gap(Screen:scaleBySize(8))
         local seg = math.floor(cw / #FOOOD_TABS)
         local row = HorizontalGroup:new {}
         for i, t in ipairs(FOOOD_TABS) do
@@ -3710,45 +3852,62 @@ function FooodView:build()
             table.insert(row, FrameContainer:new { bordersize = bord, padding = 0, margin = 0, radius = 0,
                 background = sel and Blitbuffer.COLOR_BLACK or nil,
                 CenterContainer:new { dimen = Geom:new { w = seg - 2 * bord, h = tab_h - 2 * bord },
-                    TextWidget:new { text = t.label, face = f_meta, bold = true, max_width = seg - 2 * bord,
+                    TextWidget:new { text = t.label, face = f_bar, bold = true, max_width = seg - 2 * bord,
                         fgcolor = sel and Blitbuffer.COLOR_WHITE or nil } } })
             self.hit[#self.hit + 1] = { kind = "tab", tab = t.key, x1 = pad + (i - 1) * seg, x2 = pad + i * seg,
                 y1 = y, y2 = y + tab_h }
         end
-        out[#out + 1] = row
-        y = y + tab_h
+        add(row, tab_h)
+        gap(Screen:scaleBySize(10))
     end
 
-    local entries = self:entries(cw)
-    local avail = H - pad - y - pager_h - Screen:scaleBySize(8)
+    -- ---- the card: one bordered box down to the pager, as on the dashboard
+    local card_h = H - pad - y - pager_h - Screen:scaleBySize(6)
+    local avail = card_h - 2 * (bord + ipad)
+    local entries = self:entries(iw)
     local pages = fooodPages(entries, avail)
     if self.page > #pages then self.page = #pages end
     self.pages = #pages
+    local body, by = {}, y + bord + ipad
     local shown = {}
     for _i, e in ipairs(pages[self.page]) do
         shown[e] = true
-        add(e.widget, e.target)
+        body[#body + 1] = e.widget
+        local h = e.widget:getSize().h
+        if e.target then
+            e.target.y1, e.target.y2 = by, by + h
+            self.hit[#self.hit + 1] = e.target
+        end
+        by = by + h
     end
     for _i, e in ipairs(entries) do
         if not shown[e] and e.widget.free then pcall(function() e.widget:free() end) end
     end
+    -- The frame reports its content's height, not `height` (PW3: the pager
+    -- slid up into a short card), so the body is padded to the full box.
+    if avail - (by - (y + bord + ipad)) > 0 then
+        body[#body + 1] = VerticalSpan:new { width = avail - (by - (y + bord + ipad)) }
+    end
+    add(FrameContainer:new { bordersize = bord, padding = ipad, margin = 0, radius = 0,
+        width = cw,
+        VerticalGroup:new { align = "left", unpack(body) } }, card_h)
+    self.card_bottom = y
 
-    -- pager, pinned to the bottom; absent when everything fits on one page
+    -- ---- pager: arrows and where you are; absent on a single page
+    gap(Screen:scaleBySize(6))
     if #pages > 1 then
-        local spacer = H - pad - pager_h - Screen:scaleBySize(4) - y
-        if spacer > 0 then gap(spacer) end
-        add(rule(cw))
         local third = math.floor(cw / 3)
-        local function cell(s, enabled)
+        local function pcell(s, enabled, bold)
             return CenterContainer:new { dimen = Geom:new { w = third, h = pager_h },
-                TextWidget:new { text = s, face = f_meta, bold = enabled, fgcolor = not enabled and gray or nil } }
+                TextWidget:new { text = s, face = bold and faceFull(SIZE_HEAD) or f_bar, bold = enabled,
+                    fgcolor = not enabled and Blitbuffer.COLOR_GRAY_9 or nil } }
         end
         local top = y
         add(HorizontalGroup:new {
-            cell("‹  POPRZEDNIA", self.page > 1),
-            cell(string.format("%d / %d", self.page, #pages), false),
-            cell("NASTĘPNA  ›", self.page < #pages),
-        })
+            pcell("‹", self.page > 1, true),
+            pcell(string.format("%d / %d", self.page, #pages), false),
+            pcell("›", self.page < #pages, true),
+        }, pager_h)
         if self.page > 1 then
             self.hit[#self.hit + 1] = { kind = "page", delta = -1, x1 = pad, x2 = pad + third, y1 = top, y2 = y }
         end
@@ -3762,6 +3921,13 @@ function FooodView:build()
         width = W, height = H,
         VerticalGroup:new { align = "left", unpack(out) },
     }
+end
+
+function FooodView:tabLabel()
+    for _i, t in ipairs(FOOOD_TABS) do
+        if t.key == self.tab then return t.label end
+    end
+    return "PRZEPISY"
 end
 
 function FooodView:redraw()
@@ -3796,6 +3962,7 @@ function FooodView:onTap(_arg, ges)
     if t.kind == "back" then return self:back() end
     if t.kind == "page" then return t.delta > 0 and self:onNextPage() or self:onPrevPage() end
     if t.kind == "recipe" then self:openRecipe(t.id); return true end
+    if t.kind == "font" then self:setFontStep(t.delta); return true end
     if t.kind == "tab" then
         if t.tab ~= self.tab then
             track("jedzenie", "tab", t.tab)
