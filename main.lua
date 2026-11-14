@@ -1532,6 +1532,7 @@ function Dashboard:build()
     local nav_items = {
         { icon = "close", label = "ZAMKNIJ", target = { kind = "close", label = "close" } },
         { icon = "fork", label = "JEDZENIE", count = show_counts and shopping.total or nil, target = { screen = "foood", label = "foood" } },
+        { icon = "k_cook", label = "KUCHNIA", target = { screen = "kitchen", label = "kitchen" } },
         { icon = "yarn", label = "CRAFTSSS", target = { screen = "crafts", label = "crafts" } },
         { icon = "home", label = "DOM", count = show_counts and out or nil, target = { screen = "house", label = "house" } },
         { icon = "more", label = "WIĘCEJ", target = { kind = "more", label = "more" } },
@@ -3251,6 +3252,9 @@ function ReadingOS:openScreen(dashboard, screen)
     elseif screen == "foood" then
         return self:openFoood(dashboard)
 
+    elseif screen == "kitchen" then
+        return self:openKitchen(dashboard)
+
     elseif screen == "house" then
         local src = d.house or {}
         local items = {}
@@ -3536,6 +3540,7 @@ local PL_UPPER = { ["ą"] = "Ą", ["ć"] = "Ć", ["ę"] = "Ę", ["ł"] = "Ł", [
 local function plUpper(s)
     return (tostring(s or ""):upper():gsub("[\195\196\197][\128-\191]", function(c) return PL_UPPER[c] or c end))
 end
+ReadingOS.plUpper = plUpper -- the kitchen block below needs it too; a field costs no outer local
 
 function FooodView:fontKind()
     if self.recipe then return "recipe" end
@@ -4023,6 +4028,2737 @@ end
 ReadingOS._FooodView = FooodView -- test_foood_layout.lua
 ReadingOS._fooodPages = fooodPages
 end -- jedzenie
+
+-- ----------------------------------------------------------------- kuchnia
+--
+-- KUCHNIA (design row E, Leo "q42 ok", 2026-11-14): the Kindle on the kitchen
+-- wall, sideways. A 56-px rail on the left picks the screen (Zadania, Gotuj,
+-- Spiżarnia, Plan, Czytaj); everything is drawn against the 724×536 mockup and
+-- scaled by the short side (×2 on the PW3). One table, not a pile of locals:
+-- main.lua sits at LuaJIT's 200-local ceiling.
+--
+-- It turns the screen itself and turns it back only if it did — not through
+-- ssEnterLandscape, whose saved mode belongs to the sleep screen. The sleep
+-- screen closes it first (closeOpenTeraz), so its restore never lands on a
+-- half-drawn sleep page.
+local Kitchen = {}
+do
+local CACHE_FILE = DataStorage:getDataDir() .. "/cache/readingos-kitchen.json"
+local UNDO_S = 120 -- Q61: COFNIJ stays in the footer for two minutes
+local RAIL = {
+    { key = "tasks", icon = "k_tasks" },
+    { key = "cook", icon = "k_cook" },
+    { key = "pantry", icon = "k_pantry" },
+    { key = "plan", icon = "k_plan" },
+    { key = "read", icon = "k_read" },
+}
+
+-- Phosphor (MIT) bold glyphs from the mockup; white twins for the selected rail cell.
+local function phosphor(d)
+    return [[<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 256 256"><path fill="#000000" d="]] .. d .. [["/></svg>]]
+end
+ICON_SVG.k_tasks = phosphor("M228,128a12,12,0,0,1-12,12H128a12,12,0,0,1,0-24h88A12,12,0,0,1,228,128ZM128,76h88a12,12,0,0,0,0-24H128a12,12,0,0,0,0,24Zm88,104H128a12,12,0,0,0,0,24h88a12,12,0,0,0,0-24ZM79.51,39.51,56,63l-7.51-7.52a12,12,0,0,0-17,17l16,16a12,12,0,0,0,17,0l32-32a12,12,0,0,0-17-17Zm0,64L56,127l-7.51-7.52a12,12,0,1,0-17,17l16,16a12,12,0,0,0,17,0l32-32a12,12,0,0,0-17-17Zm0,64L56,191l-7.51-7.52a12,12,0,1,0-17,17l16,16a12,12,0,0,0,17,0l32-32a12,12,0,0,0-17-17Z")
+ICON_SVG.k_cook = phosphor("M253.76,93A12,12,0,0,0,237,90.24l-9,6.44V80a12,12,0,0,0-12-12H40A12,12,0,0,0,28,80V96.68l-9-6.44A12,12,0,1,0,5,109.76l23,16.42V184a36,36,0,0,0,36,36H192a36,36,0,0,0,36-36V126.18l23-16.42A12,12,0,0,0,253.76,93ZM204,184a12,12,0,0,1-12,12H64a12,12,0,0,1-12-12V92H204ZM76,40V16a12,12,0,0,1,24,0V40a12,12,0,0,1-24,0Zm40,0V16a12,12,0,0,1,24,0V40a12,12,0,0,1-24,0Zm40,0V16a12,12,0,0,1,24,0V40a12,12,0,0,1-24,0Z")
+ICON_SVG.k_pantry = phosphor("M188,49.68V32a20,20,0,0,0-20-20H88A20,20,0,0,0,68,32V49.68A44.06,44.06,0,0,0,36,92V200a44.05,44.05,0,0,0,44,44h96a44.05,44.05,0,0,0,44-44V92A44.06,44.06,0,0,0,188,49.68ZM164,48H140V36h24ZM116,36V48H92V36Zm80,164a20,20,0,0,1-20,20H80a20,20,0,0,1-20-20V92A20,20,0,0,1,80,72h96a20,20,0,0,1,20,20Z")
+ICON_SVG.k_plan = phosphor("M208,28H188V24a12,12,0,0,0-24,0v4H92V24a12,12,0,0,0-24,0v4H48A20,20,0,0,0,28,48V208a20,20,0,0,0,20,20H208a20,20,0,0,0,20-20V48A20,20,0,0,0,208,28ZM68,52a12,12,0,0,0,24,0h72a12,12,0,0,0,24,0h16V76H52V52ZM52,204V100H204V204Zm92-76a16,16,0,1,1-16-16A16,16,0,0,1,144,128Zm48,0a16,16,0,1,1-16-16A16,16,0,0,1,192,128ZM96,176a16,16,0,1,1-16-16A16,16,0,0,1,96,176Zm48,0a16,16,0,1,1-16-16A16,16,0,0,1,144,176Zm48,0a16,16,0,1,1-16-16A16,16,0,0,1,192,176Z")
+ICON_SVG.k_read = phosphor("M232,44H160a43.86,43.86,0,0,0-32,13.85A43.86,43.86,0,0,0,96,44H24A12,12,0,0,0,12,56V200a12,12,0,0,0,12,12H96a20,20,0,0,1,20,20,12,12,0,0,0,24,0,20,20,0,0,1,20-20h72a12,12,0,0,0,12-12V56A12,12,0,0,0,232,44ZM96,188H36V68H96a20,20,0,0,1,20,20V192.81A43.79,43.79,0,0,0,96,188Zm124,0H160a43.71,43.71,0,0,0-20,4.83V88a20,20,0,0,1,20-20h60Z")
+for _i, r in ipairs(RAIL) do
+    ICON_SVG[r.icon .. "_w"] = ICON_SVG[r.icon]:gsub("#000000", "#FFFFFF")
+end
+
+-- ---- geometry: mockup px → device px, mockup font px → a cfont face
+
+local function px(n)
+    return math.floor(n * math.min(Screen:getWidth(), Screen:getHeight()) / 536 + 0.5)
+end
+Kitchen.px = px
+
+--- A−/A+ on the rail (Q65, Q67): one text size for every kitchen screen.
+--- Text and the rows that hold it grow together; columns, buttons and the
+--- rail keep their drawn size, so a bigger size means fewer rows to a page.
+Kitchen.ZOOM_MIN, Kitchen.ZOOM_MAX = -2, 3
+function Kitchen.fontStep()
+    local n = math.floor(tonumber(get("readingos_kitchen_font")) or 0)
+    return math.max(Kitchen.ZOOM_MIN, math.min(Kitchen.ZOOM_MAX, n))
+end
+function Kitchen.zoom() return 1 + 0.1 * Kitchen.fontStep() end
+--- A height that holds text: grows and shrinks with A−/A+.
+local function zpx(n) return px(n * Kitchen.zoom()) end
+
+local function kface(n, raw)
+    -- Font:getFace scales by DPI itself; hand it the size that lands on px(n).
+    -- `raw` = the rail's own labels, which stay put while A−/A+ move the rest.
+    local dpi = Screen:scaleBySize(1000) / 1000
+    local size = raw and px(n) or zpx(n)
+    return Font:getFace("cfont", math.max(1, math.floor(size / dpi + 0.5)))
+end
+
+local function ktext(s, n, bold, max_w, white)
+    return TextWidget:new {
+        text = tostring(s or ""), face = kface(n), bold = bold or nil, max_width = max_w,
+        fgcolor = white and Blitbuffer.COLOR_WHITE or Blitbuffer.COLOR_BLACK,
+    }
+end
+
+local function hline(w, n)
+    return LineWidget:new { dimen = Geom:new { w = w, h = px(n or 1) }, background = Blitbuffer.COLOR_BLACK }
+end
+
+local function vline(h, n)
+    return LineWidget:new { dimen = Geom:new { w = px(n or 3), h = h }, background = Blitbuffer.COLOR_BLACK }
+end
+
+--- A fixed w×h cell, content left (after `pad`) or centred.
+local function cell(w, h, child, pad, center)
+    if center then return CenterContainer:new { dimen = Geom:new { w = w, h = h }, child } end
+    return LeftContainer:new { dimen = Geom:new { w = w, h = h },
+        HorizontalGroup:new { align = "center", HorizontalSpan:new { width = pad or 0 }, child } }
+end
+
+--- The black strip that heads a column: MOŻESZ TERAZ · 4.
+local function band(w, label)
+    return FrameContainer:new {
+        background = Blitbuffer.COLOR_BLACK, bordersize = 0, padding = 0, margin = 0,
+        width = w, height = zpx(24),
+        cell(w, zpx(24), ktext(label, 12, true, w - 2 * px(14), true), px(14)),
+    }
+end
+
+--- A bordered button; `on` = filled black (selected chip, GOTUJ).
+local function button(w, h, label, n, on)
+    return FrameContainer:new {
+        background = on and Blitbuffer.COLOR_BLACK or Blitbuffer.COLOR_WHITE,
+        bordersize = px(3), radius = px(8), padding = 0, margin = 0, width = w, height = h,
+        cell(w - 2 * px(3), h - 2 * px(3), ktext(label, n, true, w - 2 * px(10), on), 0, true),
+    }
+end
+
+local function checkbox(n)
+    return FrameContainer:new { bordersize = px(3), radius = px(5), padding = 0, margin = 0,
+        width = px(n), height = px(n), HorizontalSpan:new { width = 0 } }
+end
+
+local function plural(n, one, few, many)
+    if n == 1 then return one end
+    local d, h = n % 10, n % 100
+    if d >= 2 and d <= 4 and (h < 12 or h > 14) then return few end
+    return many
+end
+Kitchen.plural = plural
+
+-- BEGIN quiet-pure (test_kitchen_quiet.lua runs this region on its own)
+-- Quiet hours (Q78–Q80, Q83–Q86): hand-set windows in which the kitchen does
+-- not refresh by itself. A window is { days = all|wd|we, from, to } in minutes
+-- after midnight, 30-min steps; to < from runs past midnight. It belongs to
+-- the day it STARTS on: Fri 22:30–Sat 6:30 is a pon–pt window. Windows that
+-- overlap or touch chain into one quiet span. Edges come from os.time on
+-- local fields, never from adding seconds, so a DST night lands right.
+local Quiet = {}
+Quiet.MAX = 3
+Quiet.DAYS = { "all", "wd", "we" }
+Quiet.DAY_LABEL = { all = "codziennie", wd = "pon–pt", we = "sob–nd" }
+Quiet.EVERY = { 5, 10, 15, 30, 60 }
+Quiet.DEFAULT = { { days = "all", from = 22 * 60 + 30, to = 6 * 60 + 30 } }
+Quiet.HORIZON = 8 * 86400
+
+--- 390 → "6:30" (no leading zero).
+function Quiet.hm(m)
+    m = math.floor(tonumber(m) or 0) % 1440
+    return string.format("%d:%02d", math.floor(m / 60), m % 60)
+end
+
+--- CO ILE: one of 5/10/15/30/60 minutes, anything else → 15.
+function Quiet.every(n)
+    n = tonumber(n)
+    for _i, e in ipairs(Quiet.EVERY) do if e == n then return e end end
+    return 15
+end
+
+--- codziennie → pon–pt → sob–nd → codziennie (Q79).
+function Quiet.nextDays(d)
+    for i, k in ipairs(Quiet.DAYS) do
+        if k == d then return Quiet.DAYS[i % #Quiet.DAYS + 1] end
+    end
+    return Quiet.DAYS[1]
+end
+
+--- ±30 min, 23:30 + 30 → 0:00; never onto `other` (from == to means nothing).
+function Quiet.step(m, delta, other)
+    local n = (m + delta) % 1440
+    if n == other then return m end
+    return n
+end
+
+--- A fresh, valid list: new tables (the settings store keeps a reference to
+--- whatever it was handed), 30-min steps, from ≠ to, at most MAX.
+function Quiet.clean(list)
+    local out = {}
+    if type(list) ~= "table" then return out end
+    for _i, w in ipairs(list) do
+        local f = type(w) == "table" and tonumber(w.from)
+        local t = type(w) == "table" and tonumber(w.to)
+        if f and t and f % 30 == 0 and t % 30 == 0 and f >= 0 and f < 1440 and t >= 0 and t < 1440
+            and f ~= t and #out < Quiet.MAX then
+            out[#out + 1] = { days = Quiet.DAY_LABEL[w.days] and w.days or "all", from = f, to = t }
+        end
+    end
+    return out
+end
+
+local function dayOk(days, wday) -- wday: 1 = Sunday
+    if days == "wd" then return wday >= 2 and wday <= 6 end
+    if days == "we" then return wday == 1 or wday == 7 end
+    return true
+end
+
+local function at(t, minutes, plus_day)
+    return os.time { year = t.year, month = t.month, day = t.day + (plus_day and 1 or 0),
+        hour = math.floor(minutes / 60), min = minutes % 60, sec = 0 }
+end
+
+--- Merged quiet spans { s, e } from yesterday to 8 days ahead of `now`.
+function Quiet.spans(windows, now)
+    local base = os.date("*t", now)
+    local raw = {}
+    for dd = -1, 8 do
+        local t = os.date("*t", os.time { year = base.year, month = base.month, day = base.day + dd, hour = 12 })
+        for _i, w in ipairs(windows or {}) do
+            if dayOk(w.days, t.wday) then
+                local s, e = at(t, w.from), at(t, w.to, w.to < w.from)
+                if e > s then raw[#raw + 1] = { s, e } end
+            end
+        end
+    end
+    table.sort(raw, function(a, b) return a[1] < b[1] end)
+    local out = {}
+    for _i, r in ipairs(raw) do
+        local last = out[#out]
+        if last and r[1] <= last[2] then
+            out[#out] = { last[1], math.max(last[2], r[2]) }
+        else
+            out[#out + 1] = r
+        end
+    end
+    return out
+end
+
+--- The quiet span `now` is in: start, end — end nil when it never ends
+--- within the horizon (windows chained round the clock). nil when not quiet.
+function Quiet.span(windows, now)
+    for _i, sp in ipairs(Quiet.spans(windows, now)) do
+        if sp[1] <= now and now < sp[2] then
+            return sp[1], (sp[2] - now < Quiet.HORIZON) and sp[2] or nil
+        end
+    end
+    return nil
+end
+
+--- The next quiet start after `now` (outside the span `now` may be in).
+function Quiet.nextStart(windows, now)
+    for _i, sp in ipairs(Quiet.spans(windows, now)) do
+        if sp[1] > now then return sp[1] end
+    end
+    return nil
+end
+
+--- What the kitchen does next by itself: { at, kind } with kind
+--- refresh | quiet_start | quiet_end, or nil for nothing at all.
+--- auto off: only quiet starts (the light goes off, Q83), never an end.
+function Quiet.next(now, auto, every, windows)
+    local s, e = Quiet.span(windows, now)
+    if s and auto then return e and { at = e, kind = "quiet_end" } or nil end
+    local qs = Quiet.nextStart(windows, now)
+    if not auto then return qs and { at = qs, kind = "quiet_start" } or nil end
+    local r = now + Quiet.every(every) * 60
+    if qs and qs <= r then return { at = qs, kind = "quiet_start" } end
+    return { at = r, kind = "refresh" }
+end
+-- END quiet-pure
+Kitchen.Quiet = Quiet
+
+--- The refresh settings (D1), read fresh every time; the windows list is a copy.
+function Kitchen.cfg()
+    local q = get("readingos_kitchen_quiet")
+    return {
+        auto = get("readingos_kitchen_auto") ~= false,
+        every = Quiet.every(get("readingos_kitchen_every")),
+        windows = Quiet.clean(q == nil and Quiet.DEFAULT or q),
+        light_on = get("readingos_kitchen_quiet_light") == true, -- default WYŁ: dark in quiet
+    }
+end
+
+--- The header's state, one wording for E1/E3/E4/D1 (mockup D2):
+---   stan na 14:30 · następne 14:45          (automatycznie)
+---   stan na 22:30 · cisza do 6:30           (a quiet window)
+---   stan na 14:30 · odświeżanie wyłączone   (SAMO SIĘ ODŚWIEŻA = WYŁ)
+---   stan na 13:10 · brak sieci, spróbuję 14:45
+--- Off beats quiet beats the network; offline in quiet or off says both.
+--- `at` = the time the shown data is from (E4 on another week); offline it
+--- is the cache's own time, never the open time. No "›" — callers add it.
+function Kitchen.status(v, at)
+    local shown = at or (v.offline and v.saved_at or (not v.offline and v.fetched_at)) or nil
+    local head = _("stan na ") .. (shown and Kitchen.clock(shown) or "?")
+    local cfg = Kitchen.cfg()
+    local net = v.offline and _("brak sieci") or nil
+    local tail
+    if not cfg.auto then
+        tail = _("odświeżanie wyłączone")
+    else
+        local qs, qe = Quiet.span(cfg.windows, os.time())
+        if qs then
+            tail = qe and (_("cisza do ") .. Kitchen.clock(qe)) or _("cisza")
+        elseif net then
+            local ev = v.next_event
+            return head .. " · " .. net .. (ev and (_(", spróbuję ") .. Kitchen.clock(ev.at)) or "")
+        else
+            local ev = v.next_event
+            tail = ev and (_("następne ") .. Kitchen.clock(ev.at)) or nil
+        end
+    end
+    if net and tail then tail = net .. " · " .. tail end
+    return head .. (tail and (" · " .. tail) or "")
+end
+
+-- ---- data: GET /api/readingos/kitchen, the default week cached like Foood
+
+local function payloadOk(p)
+    return type(p) == "table" and type(p.tasks) == "table" and type(p.pantry) == "table"
+end
+Kitchen.payloadOk = payloadOk
+
+local function cacheSave(p)
+    util.makePath(DataStorage:getDataDir() .. "/cache/")
+    local encoded = encode({ timestamp = os.time(), data = p })
+    if not encoded then return end
+    local f = io.open(CACHE_FILE, "w")
+    if not f then return end
+    f:write(encoded)
+    f:close()
+end
+
+local function cacheLoad()
+    local f = io.open(CACHE_FILE, "r")
+    if not f then return nil end
+    local content = f:read("*all")
+    f:close()
+    local cached = decode(content)
+    if type(cached) ~= "table" or not payloadOk(cached.data) then return nil end
+    return cached.data, tonumber(cached.timestamp)
+end
+
+--- @return table|nil data, boolean offline, number|nil saved_at (when offline)
+function Kitchen.fetch(from)
+    local ok_conn, connected = pcall(function() return NetworkMgr:isConnected() end)
+    if ok_conn and connected then
+        local url = baseUrl() .. "/api/readingos/kitchen" .. (from and ("?from=" .. from) or "")
+        local body, err = request("GET", url)
+        local data = body and decode(body)
+        if payloadOk(data) then
+            if not from then cacheSave(data) end
+            return data, false, nil
+        end
+        logger.warn("ReadingOS: kitchen fetch failed:", err or "bad JSON")
+    end
+    if from then return nil, true, nil end
+    local data, saved_at = cacheLoad()
+    return data, true, saved_at
+end
+
+--- A copy of the payload without task `id` (just done) and with ZROBIONE + 1.
+--- The refetch right after confirms it; offline, the row is gone anyway.
+function Kitchen.without(data, id)
+    local t = data.tasks or {}
+    local function keep(rows)
+        local out = {}
+        for _i, r in ipairs(rows or {}) do if r.id ~= id then out[#out + 1] = r end end
+        return out
+    end
+    local tasks = {}
+    for k, v in pairs(t) do tasks[k] = v end
+    tasks.now, tasks.later = keep(t.now), keep(t.later)
+    tasks.done = (tonumber(t.done) or 0) + 1
+    local out = {}
+    for k, v in pairs(data) do out[k] = v end
+    out.tasks = tasks
+    return out
+end
+
+--- E1's meta line under a task: "porządki · zaległe".
+local WHEN_WORD = { ["wcześniej"] = "zaległe" }
+function Kitchen.taskMeta(r)
+    local chip = lowerKey(tostring(r.chip or "")) -- UTF-8 aware: "PORZĄDKI" → "porządki"
+    local when = WHEN_WORD[r.when] or r.when
+    if chip == "" then return when or "" end
+    return when and (chip .. " · " .. when) or chip
+end
+
+local function chipFilter(rows, chip)
+    if not chip then return rows or {} end
+    local out = {}
+    for _i, r in ipairs(rows or {}) do if r.chip == chip then out[#out + 1] = r end end
+    return out
+end
+
+--- Rows that fit in `avail` px at `row_h` each; past that the last slot is a
+--- pager ("WIĘCEJ · 1/3 ›"). @return slice, page, pages, per_page
+function Kitchen.pageOf(rows, avail, row_h, page)
+    local fit = math.max(1, math.floor(avail / row_h))
+    if #rows <= fit then return rows, 1, 1, fit end
+    local per = math.max(1, fit - 1)
+    local pages = math.ceil(#rows / per)
+    page = math.min(math.max(1, page or 1), pages)
+    local out = {}
+    for i = (page - 1) * per + 1, math.min(#rows, page * per) do out[#out + 1] = rows[i] end
+    return out, page, pages, per
+end
+
+-- ---- the view
+
+local View = InputContainer:extend {
+    plugin = nil,
+    dashboard = nil,
+    data = nil,
+    offline = false,
+    saved_at = nil,
+    screen = "tasks",
+    chip = nil,       -- nil = WSZYSTKO
+    now_page = 1,
+    later_page = 1,
+    last = nil,       -- { label, at, undone } — the footer's COFNIJ (Q61)
+}
+Kitchen.View = View
+View.targetAt = Dashboard.targetAt
+
+function View:init()
+    self.opened_at = os.time()
+    -- Turn first, then measure: every row sizes itself off Screen:getWidth().
+    local ok, mode = pcall(function() return Screen:getRotationMode() end)
+    if ok and type(mode) == "number" and mode % 2 == 0 then
+        self.saved_rotation = mode
+        pcall(function() Screen:setRotationMode(Screen.DEVICE_ROTATED_CLOCKWISE) end)
+    end
+    self.dimen = Geom:new { x = 0, y = 0, w = Screen:getWidth(), h = Screen:getHeight() }
+    self.covers_fullscreen = true
+    self.readingos_screen = "kitchen" -- Phone Companion V2: back/home close it like any screen
+    Kitchen.open = self
+    self.hit = {}
+    self.fetched_at = os.time()
+    if Device:isTouchDevice() then
+        self.ges_events = { Tap = { GestureRange:new { ges = "tap", range = self.dimen } } }
+    end
+    self.refresh_cb = function() self:refresh() end
+    self.event_cb = function() self:quietEvent() end
+    self.undo_cb = function() if not self.closed then self:redraw() end end
+    self:schedule()
+    self:syncAwake()
+    self[1] = self:build()
+end
+
+--- On the charger it is a wall display and stays on (FooodView's rule).
+function View:syncAwake()
+    local ok_c, chg = pcall(function() return Device:getPowerDevice():isCharging() end)
+    self.awake = ok_c and chg and true or false
+    Kitchen.hold("charger", self.awake)
+end
+function View:onCharging() self:syncAwake() end
+function View:onNotCharging() self:syncAwake() end
+
+--- The one thing the kitchen does next by itself (D1 settings, quiet
+--- windows), in one slot. Set again after every refresh, so a tap or
+--- ODŚWIEŻ TERAZ in quiet points it at the quiet end, not +15 min.
+function View:schedule()
+    UIManager:unschedule(self.event_cb)
+    self.next_event = nil
+    if self.closed then return end
+    local cfg, now = Kitchen.cfg(), os.time()
+    local ev = Quiet.next(now, cfg.auto, cfg.every, cfg.windows)
+    self.next_event = ev
+    if ev then UIManager:scheduleIn(math.max(1, ev.at - now), self.event_cb) end
+end
+
+function View:quietEvent()
+    local ev = self.next_event
+    if self.closed or not ev then return end
+    local now = os.time()
+    if now < ev.at then -- the timer runs on its own clock; a second early is not yet
+        return UIManager:scheduleIn(ev.at - now, self.event_cb)
+    end
+    local cfg = Kitchen.cfg()
+    if ev.kind == "quiet_start" then
+        if not cfg.light_on then Kitchen.lightOff(self.plugin) end -- Q80/Q83
+        if not cfg.auto then return self:schedule() end
+        track("kuchnia", "quiet", "start")
+    elseif ev.kind == "quiet_end" then
+        Kitchen.lightBack(self.plugin) -- Q85: auto WŁ gives the level back at the end
+        track("kuchnia", "quiet", "end")
+    end
+    return self:refresh() -- Q84: quiet starts with one last fetch, the frozen view
+end
+
+--- On schedule, and right after a tap. Always redraws: the header's
+--- "stan na" is part of what the screen says.
+function View:refresh()
+    if self.closed then return end
+    self:syncAwake()
+    local data, offline, saved_at = Kitchen.fetch()
+    if data then
+        self.data, self.offline, self.saved_at = data, offline, saved_at
+        if not offline then self.fetched_at = os.time() end
+    end
+    self:schedule()
+    self:redraw()
+end
+
+function View:redraw()
+    local old = self[1]
+    self[1] = nil
+    if old and old.free then pcall(function() old:free() end) end
+    self[1] = self:build()
+    UIManager:setDirty(self, "ui")
+end
+
+function View:claim(x1, y1, x2, y2, target)
+    target.x1, target.y1, target.x2, target.y2 = x1, y1, x2, y2
+    self.hit[#self.hit + 1] = target
+end
+
+function View:build()
+    self.hit = {}
+    local W, H = self.dimen.w, self.dimen.h
+    local rail_w = px(56)
+    local body
+    if self.screen == "tasks" then
+        body = self:buildTasks(rail_w, W - rail_w, H)
+    elseif self.screen == "cook" then
+        body = self:buildCook(rail_w, W - rail_w, H)
+    elseif self.screen == "pantry" then
+        body = self:buildUsed(rail_w, W - rail_w, H) or self:buildPantry(rail_w, W - rail_w, H)
+    elseif self.screen == "plan" then
+        body = self:buildPlan(rail_w, W - rail_w, H)
+    elseif self.screen == "settings" then
+        body = self:buildSettings(rail_w, W - rail_w, H)
+    else
+        body = cell(W - rail_w, H, ktext(_("Wkrótce."), 18, true), 0, true)
+    end
+    return FrameContainer:new {
+        background = Blitbuffer.COLOR_WHITE, bordersize = 0, padding = 0, margin = 0, width = W, height = H,
+        HorizontalGroup:new { align = "top", self:buildRail(rail_w, H), body },
+    }
+end
+
+function View:buildRail(w, H)
+    local inner = w - px(3)
+    local cells = {}
+    for _i, r in ipairs(RAIL) do
+        cells[#cells + 1] = { icon = r.icon, on = r.key == self.screen, target = { kind = "rail", key = r.key } }
+    end
+    -- Q65: text size and light, the same spot on every kitchen screen
+    local step = Kitchen.fontStep()
+    cells[#cells + 1] = { label = "A−", off = step <= Kitchen.ZOOM_MIN, rule = 3, target = { kind = "zoom", delta = -1 } }
+    cells[#cells + 1] = { label = "A+", off = step >= Kitchen.ZOOM_MAX, target = { kind = "zoom", delta = 1 } }
+    if self.plugin.lightLevel and self.plugin:lightLevel() then -- no front light, no ☼ cells
+        cells[#cells + 1] = { icon = "k_sun", label = "−", rule = 3, target = { kind = "light", delta = -LIGHT_STEP } }
+        cells[#cells + 1] = { icon = "k_sun", label = "+", target = { kind = "light", delta = LIGHT_STEP } }
+    end
+    local col = VerticalGroup:new { align = "left" }
+    local y = 0
+    for i, c in ipairs(cells) do
+        local h = (i == #cells) and (H - y) or math.floor(H / #cells)
+        local line = i > 1 and px(c.rule or 1) or 0
+        if line > 0 then table.insert(col, hline(inner, c.rule)) end
+        local face
+        if c.label then
+            local text = TextWidget:new { text = c.label, face = kface(18, true), bold = true,
+                fgcolor = c.off and Blitbuffer.COLOR_GRAY_9 or Blitbuffer.COLOR_BLACK }
+            face = c.icon and HorizontalGroup:new { align = "center", icon(c.icon, px(22)),
+                HorizontalSpan:new { width = px(2) }, text } or text
+        else
+            face = icon(c.on and (c.icon .. "_w") or c.icon, px(28))
+        end
+        table.insert(col, FrameContainer:new {
+            background = c.on and Blitbuffer.COLOR_BLACK or Blitbuffer.COLOR_WHITE,
+            bordersize = 0, padding = 0, margin = 0, width = inner, height = h - line,
+            cell(inner, h - line, face, 0, true),
+        })
+        self:claim(0, y, w, y + h, c.target)
+        y = y + h
+    end
+    return HorizontalGroup:new { align = "top", col, vline(H) }
+end
+
+--- Header: "piątek, 13 listopada  stan na 14:30 · następne 14:45 ›" + ODŚWIEŻ.
+function View:buildHeader(x0, w)
+    local d = self.data or {}
+    local h = px(56)
+    local btn_label = _("ODŚWIEŻ")
+    local btn_w = ktext(btn_label, 14, true):getSize().w + 2 * px(12) + 2 * px(3)
+    local status = Kitchen.status(self) .. " ›"
+    local title = d.today_label or ""
+    if d.today and d.today ~= os.date("%Y-%m-%d") then title = _("NIEAKTUALNE · ") .. title end
+    local left_w = w - 2 * px(14) - btn_w - px(12)
+    local title_w = ktext(title, 22, true, left_w):getSize().w
+    local left = HorizontalGroup:new { align = "center",
+        ktext(title, 22, true, left_w),
+        HorizontalSpan:new { width = px(12) },
+        ktext(status, 14, false, math.max(1, left_w - title_w - px(12))),
+    }
+    local row = HorizontalGroup:new { align = "center",
+        cell(w - btn_w - px(14), h - px(3), left, px(14)),
+        button(btn_w, px(44), btn_label, 14, false),
+    }
+    self:claim(x0, 0, x0 + w - btn_w - px(14), h, { kind = "settings" })
+    self:claim(x0 + w - btn_w - px(14), 0, x0 + w, h, { kind = "refresh" })
+    return VerticalGroup:new { align = "left", row, hline(w, 3) }, h
+end
+
+--- WSZYSTKO · 7 | PORZĄDKI · 4 | JEDZENIE · 1 | PRADA · 2
+function View:buildChips(x0, y0, w)
+    local t = (self.data or {}).tasks or {}
+    local chips = { { label = _("WSZYSTKO · ") .. tostring(t.total or 0), chip = nil } }
+    for _i, c in ipairs(t.chips or {}) do
+        chips[#chips + 1] = { label = tostring(c.name) .. " · " .. tostring(c.n or 0), chip = c.name }
+    end
+    local pad, gap, ch = px(14), px(6), px(48)
+    local cw = math.floor((w - 2 * pad - (#chips - 1) * gap) / #chips)
+    local row = HorizontalGroup:new { align = "center", HorizontalSpan:new { width = pad } }
+    local x = x0 + pad
+    for i, c in ipairs(chips) do
+        if i > 1 then table.insert(row, HorizontalSpan:new { width = gap }) end
+        table.insert(row, button(cw, ch, c.label, 12, c.chip == self.chip))
+        self:claim(x, y0, x + cw, y0 + ch + 2 * px(8), { kind = "chip", chip = c.chip })
+        x = x + cw + gap
+    end
+    local h = ch + 2 * px(8)
+    return cell(w, h, row, 0), h
+end
+
+--- A column's rows, paged when they run past `avail`. Each row is
+--- { widget, target? }; returns the group and its height.
+function View:column(x0, y0, w, rows, row_h, avail, key, build_row)
+    local slice, page, pages = Kitchen.pageOf(rows, avail, row_h, self[key])
+    self[key] = page
+    local g = VerticalGroup:new { align = "left" }
+    local y = y0
+    for _i, r in ipairs(slice) do
+        table.insert(g, build_row(r, w, row_h))
+        if r.id ~= nil then
+            self:claim(x0, y, x0 + w, y + row_h, { kind = "task", id = r.id, label = r.text })
+        end
+        y = y + row_h
+    end
+    if pages > 1 then
+        local label = string.format(_("WIĘCEJ · %d/%d ›"), page, pages)
+        table.insert(g, VerticalGroup:new { align = "left",
+            cell(w, row_h - px(1), ktext(label, 14, true, w - 2 * px(14)), px(14)), hline(w) })
+        self:claim(x0, y, x0 + w, y + row_h, { kind = "page", key = key, next = page % pages + 1 })
+        y = y + row_h
+    end
+    return g, y - y0
+end
+
+local function nowRow(r, w, h)
+    local text_w = w - 2 * px(14) - px(30) - px(12)
+    return VerticalGroup:new { align = "left",
+        cell(w, h - px(1), HorizontalGroup:new { align = "center",
+            checkbox(30), HorizontalSpan:new { width = px(12) },
+            VerticalGroup:new { align = "left",
+                ktext(r.text, 18, true, text_w),
+                ktext(Kitchen.taskMeta(r), 12, false, text_w),
+            },
+        }, px(14)),
+        hline(w),
+    }
+end
+
+local function laterRow(r, w, h)
+    local text_w = w - 2 * px(14) - px(44) - px(24) - 2 * px(10)
+    return VerticalGroup:new { align = "left",
+        cell(w, h - px(1), HorizontalGroup:new { align = "center",
+            cell(px(44), h - px(1), ktext(r.time or "", 14, true, px(44)), 0),
+            HorizontalSpan:new { width = px(10) },
+            checkbox(24), HorizontalSpan:new { width = px(10) },
+            ktext(r.text, 14, false, text_w),
+        }, px(14)),
+        hline(w),
+    }
+end
+
+--- The footer of MOŻESZ TERAZ: ZROBIONE DZIŚ · 3 ›, or for two minutes
+--- after a tap "✓ Wynieść śmieci · COFNIJ" in the same place (Q61).
+function View:footer(x0, y0, w, h)
+    local t = (self.data or {}).tasks or {}
+    local last = self.last
+    local fresh = last and (os.time() - last.at) < UNDO_S
+    local left, right, target
+    if fresh and not last.undone then
+        left, right, target = "✓ " .. tostring(last.label), _("COFNIJ"), { kind = "undo" }
+    elseif fresh then
+        left, right, target = _("Cofnięte: ") .. tostring(last.label), "", { kind = "none" }
+    else
+        left, right, target = _("ZROBIONE DZIŚ · ") .. tostring(tonumber(t.done) or 0), "›", { kind = "done_list" }
+    end
+    local right_w = ktext(right, 14, true):getSize().w
+    local row = HorizontalGroup:new { align = "center",
+        cell(w - right_w - px(14), h - px(1), ktext(left, 14, true, w - right_w - 3 * px(14)), px(14)),
+        ktext(right, 14, true),
+    }
+    self:claim(x0, y0, x0 + w, y0 + h, target)
+    return VerticalGroup:new { align = "left", hline(w), row }
+end
+
+--- DZIŚ JEMY: "OBIAD · 35 min", the title, what is missing, GOTUJ ›.
+function View:mealBlock(x0, y0, w, h)
+    local d = self.data or {}
+    local m = d.meal
+    if type(m) ~= "table" then
+        return cell(w, h, ktext(_("Dziś nic z przepisem."), 14, false, w - 2 * px(14)), px(14))
+    end
+    local missing = {}
+    for _i, ing in ipairs((d.cook or {}).ingredients or {}) do
+        if not ing.have then missing[#missing + 1] = lowerKey(tostring(ing.name)) end
+    end
+    local third = #missing > 0 and (_("brak: ") .. table.concat(missing, ", ")) or ((d.cook or {}).meta or "")
+    local first = ReadingOS.plUpper(m.label) -- "Drugie śniadanie" → "DRUGIE ŚNIADANIE"
+    if (tonumber(m.minutes) or 0) > 0 then first = first .. " · " .. tostring(m.minutes) .. " min" end
+    local btn_label = _("GOTUJ ›")
+    local btn_w = ktext(btn_label, 14, true):getSize().w + 2 * px(16)
+    local text_w = w - 2 * px(14) - btn_w - px(10)
+    local btn = FrameContainer:new {
+        background = Blitbuffer.COLOR_BLACK, bordersize = 0, radius = px(8), padding = 0, margin = 0,
+        width = btn_w, height = px(52), cell(btn_w, px(52), ktext(btn_label, 14, true, nil, true), 0, true),
+    }
+    self:claim(x0, y0, x0 + w, y0 + h, { kind = "cook" })
+    return cell(w, h, HorizontalGroup:new { align = "center",
+        cell(text_w + px(10), h, VerticalGroup:new { align = "left",
+            ktext(first, 12, true, text_w),
+            ktext(m.title, 18, true, text_w),
+            ktext(third, 12, false, text_w),
+        }, 0),
+        btn,
+    }, px(14))
+end
+
+function View:buildTasks(x0, w, H)
+    local d = self.data or {}
+    local t = d.tasks or {}
+    local header, hh = self:buildHeader(x0, w)
+    local chips, chh = self:buildChips(x0, hh, w)
+    local top = hh + chh
+    local ch = H - top - px(3)            -- the two columns, under their top rule
+    local y0 = top + px(3)
+    local lw = math.floor((w - px(3)) / 2)
+    local rw = w - px(3) - lw
+    local bh = zpx(24)
+
+    -- left: MOŻESZ TERAZ
+    local left = VerticalGroup:new { align = "left" }
+    local now_rows = chipFilter(t.now, self.chip)
+    table.insert(left, band(lw, _("MOŻESZ TERAZ · ") .. #now_rows))
+    local foot_h = zpx(46)
+    local used = bh
+    if t.ok == false then
+        table.insert(left, cell(lw, zpx(62), ktext(_("Tasksss nie odpowiada."), 14, false, lw - 2 * px(14)), px(14)))
+        used = used + zpx(62)
+    elseif #now_rows == 0 then
+        table.insert(left, cell(lw, zpx(62), ktext(_("Nic na teraz."), 14, false, lw - 2 * px(14)), px(14)))
+        used = used + zpx(62)
+    else
+        local g, gh = self:column(x0, y0 + bh, lw, now_rows, zpx(62), ch - bh - foot_h, "now_page", nowRow)
+        table.insert(left, g)
+        used = used + gh
+    end
+    table.insert(left, VerticalSpan:new { width = ch - used - foot_h })
+    table.insert(left, self:footer(x0, y0 + ch - foot_h, lw, foot_h))
+
+    -- right: PÓŹNIEJ DZIŚ, JUTRO, DZIŚ JEMY
+    local rx = x0 + lw + px(3)
+    local right = VerticalGroup:new { align = "left" }
+    local later_rows = chipFilter(t.later, self.chip)
+    local tomorrow = chipFilter(t.tomorrow, self.chip)
+    local jut_h, meal_h = zpx(46), zpx(84)
+    table.insert(right, band(rw, _("PÓŹNIEJ DZIŚ · ") .. #later_rows))
+    local used_r = bh
+    local avail = ch - bh - jut_h - bh - meal_h
+    if #later_rows > 0 then
+        local g, gh = self:column(rx, y0 + bh, rw, later_rows, zpx(48), avail, "later_page", laterRow)
+        table.insert(right, g)
+        used_r = used_r + gh
+    end
+    local n = #tomorrow
+    local jut = string.format("%s · %d %s", _("JUTRO"), n, plural(n, _("zadanie"), _("zadania"), _("zadań")))
+    table.insert(right, VerticalGroup:new { align = "left",
+        HorizontalGroup:new { align = "center",
+            cell(rw - px(30), jut_h - px(1), ktext(jut, 14, true, rw - px(60)), px(14)),
+            ktext("›", 14, true) },
+        hline(rw) })
+    self:claim(rx, y0 + used_r, rx + rw, y0 + used_r + jut_h, { kind = "tomorrow" })
+    used_r = used_r + jut_h
+    table.insert(right, VerticalSpan:new { width = ch - used_r - bh - meal_h })
+    table.insert(right, band(rw, _("DZIŚ JEMY")))
+    table.insert(right, self:mealBlock(rx, y0 + ch - meal_h, rw, meal_h))
+
+    return VerticalGroup:new { align = "left",
+        header, chips, hline(w, 3),
+        HorizontalGroup:new { align = "top",
+            FrameContainer:new { bordersize = 0, padding = 0, margin = 0, width = lw, height = ch, left },
+            vline(ch),
+            FrameContainer:new { bordersize = 0, padding = 0, margin = 0, width = rw, height = ch, right },
+        },
+    }
+end
+
+-- ---- taps
+
+function View:onTap(_arg, ges)
+    local t = self:targetAt(ges.pos.x, ges.pos.y)
+    if not t then return true end
+    return self:tap(t)
+end
+
+local function listOf(rows, empty)
+    local items = {}
+    for _i, r in ipairs(rows or {}) do
+        local text = tostring(r.text or "")
+        if r.time and r.time ~= "" then text = r.time .. "  " .. text end
+        items[#items + 1] = { text = text, inert = true }
+    end
+    if #items == 0 then items = { { text = empty, inert = true } } end
+    return items
+end
+
+function View:tap(t)
+    local d = self.data or {}
+    if self:cookTap(t) then return true end
+    if self:pantryTap(t) then return true end
+    if self:planTap(t) then return true end
+    if self:settingsTap(t) then return true end
+    if t.kind == "zoom" then
+        local n = math.max(Kitchen.ZOOM_MIN, math.min(Kitchen.ZOOM_MAX, Kitchen.fontStep() + t.delta))
+        if n ~= Kitchen.fontStep() then
+            set("readingos_kitchen_font", n)
+            track("kuchnia", "font", tostring(n))
+            self:redraw()
+        end
+    elseif t.kind == "light" then
+        -- the light itself is the feedback; nothing on screen changes.
+        -- In quiet it is Leo's choice from here: nothing to give back (Q80).
+        Kitchen.quiet_light = nil
+        track("kuchnia", "light", tostring(self.plugin:stepLight(t.delta)))
+    elseif t.kind == "rail" then
+        if t.key == "read" then return self:toBook() end
+        if t.key ~= self.screen or self.pantry_used then
+            track("kuchnia", "screen", t.key)
+            self.screen, self.pantry_used = t.key, nil -- the rail leaves Co zeszło without saving
+            self:redraw()
+        end
+    elseif t.kind == "chip" then
+        if t.chip ~= self.chip then
+            self.chip, self.now_page, self.later_page = t.chip, 1, 1
+            self:redraw()
+        end
+    elseif t.kind == "page" then
+        self[t.key] = t.next
+        self:redraw()
+    elseif t.kind == "task" then
+        self:taskDone(t)
+    elseif t.kind == "undo" then
+        self:undo()
+    elseif t.kind == "done_list" then
+        self.plugin:showList(_("ZROBIONE DZIŚ"), listOf((d.tasks or {}).done_rows, _("Jeszcze nic.")))
+    elseif t.kind == "tomorrow" then
+        self.plugin:showList(_("JUTRO"), listOf(chipFilter((d.tasks or {}).tomorrow, self.chip), _("Jutro nic.")))
+    elseif t.kind == "cook" then
+        self.screen = "cook"
+        self:redraw()
+    elseif t.kind == "refresh" then
+        track("kuchnia", "refresh")
+        self:refresh()
+    end
+    return true
+end
+
+local function actError(err)
+    if err == "HTTP 409" then return _("Zadanie ma otwarte kroki. Dokończ je w tasksss.") end
+    if err == "HTTP 404" then return _("Zadania już nie ma.") end
+    return _("Nie zapisano — brak połączenia.")
+end
+Kitchen.actError = actError
+
+function View:taskDone(t)
+    -- A queued double tap must not finish the row that slid into this place.
+    local now = os.time()
+    if self.busy or now - (self.acted_at or 0) <= 1 then return end
+    self.busy = true
+    track("kuchnia", "done", tostring(t.id))
+    local res, err = self.plugin:act("task", t.id, { op = "done", label = t.label })
+    if res or err == "HTTP 404" then
+        self.data = Kitchen.without(self.data or {}, t.id)
+    end
+    if res then
+        self.last = { label = t.label, at = os.time() }
+        UIManager:unschedule(self.undo_cb)
+        UIManager:scheduleIn(UNDO_S + 1, self.undo_cb)
+    else
+        UIManager:show(InfoMessage:new { text = actError(err) })
+    end
+    self:redraw()
+    if res or err == "HTTP 404" then UIManager:nextTick(self.refresh_cb) end
+    self.acted_at = os.time()
+    self.busy = false
+end
+
+function View:undo()
+    if self.busy or not self.last then return end
+    self.busy = true
+    track("kuchnia", "undo")
+    local res = self.plugin:act("undo")
+    if res and res.ok then
+        self.last.undone = true
+        self.busy = false
+        return self:refresh()
+    end
+    UIManager:show(InfoMessage:new { text = _("Nie da się cofnąć. Za stare, już cofnięte gdzie indziej, albo brak połączenia.") })
+    self.busy = false
+end
+
+--- Czytaj (Q62): back to the book — the kitchen and the dashboard under it close.
+function View:toBook()
+    local dash = self.dashboard
+    self:onClose()
+    if dash and dash.onClose then dash:onClose() end
+    return true
+end
+
+function View:onClose()
+    if self.closed then return true end -- the sleep screen may have closed it already
+    self.closed = true
+    track("kuchnia", "back", nil, (os.time() - (self.opened_at or os.time())) * 1000)
+    UIManager:close(self)
+    return true
+end
+
+--- A power-button sleep closes it: the rotation is back before the sleep page draws.
+function View:onSuspend()
+    self.sleeping = true
+    return self:onClose()
+end
+
+function View:onCloseWidget()
+    self.closed = true
+    if Kitchen.open == self then Kitchen.open = nil end
+    UIManager:unschedule(self.refresh_cb)
+    UIManager:unschedule(self.event_cb)
+    UIManager:unschedule(self.undo_cb)
+    self.next_event = nil
+    Kitchen.lightBack(self.plugin, self.sleeping) -- Q86; asleep: the plugin's resume restores it
+    Kitchen.hold("charger", false) -- a running timer keeps its own hold
+    self.awake = false
+    if self.saved_rotation then
+        local mode = self.saved_rotation
+        self.saved_rotation = nil
+        pcall(function() Screen:setRotationMode(mode) end)
+    end
+    UIManager:setDirty(nil, "full")
+end
+
+-- ---- E2 Gotuj: ingredients on the left (tap = in the pot), one step on the right
+
+ICON_SVG.k_sun = phosphor("M88,128a40,40,0,1,0,80,0a40,40,0,1,0,-80,0ZM118,16h20v36h-20ZM118,204h20v36h-20ZM16,118h36v20h-36ZM204,118h36v20h-36ZM42,56L56,42L81,67L67,81ZM214,56L200,42L175,67L189,81ZM42,200L56,214L81,189L67,175ZM214,200L200,214L175,189L189,175Z")
+ICON_SVG.k_refresh = phosphor("M228,48V96a12,12,0,0,1-12,12H168a12,12,0,0,1,0-24h19l-7.8-7.8a75.55,75.55,0,0,0-53.32-22.26h-.43A75.49,75.49,0,0,0,72.39,75.57,12,12,0,1,1,55.61,58.41a99.38,99.38,0,0,1,69.87-28.47H126A99.42,99.42,0,0,1,196.2,59.23L204,67V48a12,12,0,0,1,24,0ZM183.61,180.43a75.49,75.49,0,0,1-53.09,21.63h-.43A75.55,75.55,0,0,1,76.77,179.8L69,172H88a12,12,0,0,0,0-24H40a12,12,0,0,0-12,12v48a12,12,0,0,0,24,0V189l7.8,7.8A99.42,99.42,0,0,0,130,226.06h.56a99.38,99.38,0,0,0,69.87-28.47,12,12,0,0,0-16.78-17.16Z")
+ICON_SVG.k_check_w = phosphor("M232.49,80.49l-128,128a12,12,0,0,1-17,0l-56-56a12,12,0,1,1,17-17L96,183,215.51,63.51a12,12,0,0,1,17,17Z"):gsub("#000000", "#FFFFFF")
+
+--- One stay-awake hold for the whole kitchen. The charger and a running
+--- timer both ask for it; whoever lets go last gives the sleep rules back —
+--- two separate saves of pause_auto_suspend would restore each other's value.
+Kitchen.holds = {}
+function Kitchen.held()
+    for _reason in pairs(Kitchen.holds) do return true end
+    return false
+end
+function Kitchen.hold(reason, on)
+    local had = Kitchen.held()
+    Kitchen.holds[reason] = on and true or nil
+    local has = Kitchen.held()
+    if has == had then return end
+    local ok, PluginShare = pcall(require, "pluginshare")
+    if has then
+        if ok and type(PluginShare) == "table" then
+            Kitchen.prev_auto_suspend = PluginShare.pause_auto_suspend
+            PluginShare.pause_auto_suspend = true
+        end
+        UIManager:preventStandby()
+    else
+        if ok and type(PluginShare) == "table" then PluginShare.pause_auto_suspend = Kitchen.prev_auto_suspend end
+        UIManager:allowStandby()
+    end
+end
+
+--- Light in quiet (Q80, Q83–Q86): off when a quiet window starts with the
+--- kitchen open, Leo's level kept here on the module (like Kitchen.timer) so
+--- no close path can lose it. It comes back only while the light is still at
+--- 0 — a ☼ tap or KOReader's own light gesture since then is Leo's choice.
+function Kitchen.lightOff(plugin)
+    local level = plugin and plugin.lightLevel and plugin:lightLevel()
+    if not level or level <= 0 then return end -- already dark: keep what was saved
+    Kitchen.quiet_light = level
+    pcall(function() Device:getPowerDevice():setIntensity(0) end)
+end
+
+--- `sleeping`: the sleep screen is next — never light the panel under it;
+--- the plugin's own onResume puts the level back on a human wake (an RTC
+--- wake skips that). Its onSuspend may have run first and saved our 0.
+function Kitchen.lightBack(plugin, sleeping)
+    local level = Kitchen.quiet_light
+    if not level then return end
+    Kitchen.quiet_light = nil
+    if not plugin or (plugin.lightLevel and plugin:lightLevel()) ~= 0 then return end
+    if sleeping then
+        if not plugin.saved_frontlight or plugin.saved_frontlight == 0 then plugin.saved_frontlight = level end
+        return
+    end
+    pcall(function() Device:getPowerDevice():setIntensity(level) end)
+end
+
+--- 600 → "10 MIN", 45 → "45 S", 90 → "1 MIN 30 S", 5400 → "1 H 30 MIN".
+function Kitchen.durLabel(s)
+    s = math.max(0, math.floor(tonumber(s) or 0))
+    if s < 60 then return s .. " S" end
+    local h, m, sec = math.floor(s / 3600), math.floor(s % 3600 / 60), s % 60
+    local out = {}
+    if h > 0 then out[#out + 1] = h .. " H" end
+    if m > 0 then out[#out + 1] = m .. " MIN" end
+    if sec > 0 and h == 0 then out[#out + 1] = sec .. " S" end
+    return table.concat(out, " ")
+end
+
+--- "sprawdź, maks. 50 min" for a 40–50 range (Q58), "" for a single length.
+function Kitchen.timerCheck(tm)
+    if (tm.hi_s or 0) <= tm.lo_s then return "" end
+    return _("sprawdź, maks. ") .. Kitchen.durLabel(tm.hi_s):lower()
+end
+
+--- Q60: the whole screen goes black and back `times` times, then `after`.
+--- An e-ink panel has no sound; this is what catches the eye from the stove.
+function Kitchen.flash(times, after)
+    local black = FrameContainer:new {
+        background = Blitbuffer.COLOR_BLACK, bordersize = 0, padding = 0, margin = 0,
+        width = Screen:getWidth(), height = Screen:getHeight(), HorizontalSpan:new { width = 0 },
+    }
+    local function round(n)
+        UIManager:show(black, "full")
+        UIManager:scheduleIn(0.4, function()
+            UIManager:close(black, "full")
+            if n > 1 then
+                UIManager:scheduleIn(0.4, function() round(n - 1) end)
+            else
+                after()
+            end
+        end)
+    end
+    round(times)
+end
+
+--- One timer at a time. It lives on the module, not the view: Czytaj or the
+--- power button close the kitchen, and a pot on the stove must not lose its
+--- timer to that. While it runs the Kindle does not auto-sleep (Q60).
+function Kitchen.timerStop()
+    local tm = Kitchen.timer
+    if not tm then return end
+    Kitchen.timer = nil
+    UIManager:unschedule(tm.cb)
+    Kitchen.hold("timer", false)
+end
+
+function Kitchen.timerStart(lo_s, hi_s, step)
+    Kitchen.timerStop()
+    lo_s = math.floor(tonumber(lo_s) or 0)
+    if lo_s <= 0 then return end
+    local tm = { lo_s = lo_s, hi_s = math.max(lo_s, math.floor(tonumber(hi_s) or lo_s)), step = step,
+        ends_at = os.time() + lo_s, key = (Kitchen.cook_state or {}).key }
+    tm.cb = function() Kitchen.timerFire(tm) end
+    Kitchen.timer = tm
+    Kitchen.hold("timer", true)
+    UIManager:scheduleIn(lo_s, tm.cb)
+    return tm
+end
+
+function Kitchen.timerFire(tm)
+    if Kitchen.timer ~= tm or tm.done then return end
+    tm.done = true
+    Kitchen.hold("timer", false) -- from here the usual sleep rules are back
+    Kitchen.flash(2, function()
+        local v = Kitchen.open
+        if v and not v.closed then
+            -- GOTOWE over the step it was started on
+            local st = Kitchen.cook_state
+            if st and st.key == tm.key and tm.step then st.step = tm.step end
+            v.screen = "cook"
+            return v:redraw()
+        end
+        if Kitchen.timer == tm then Kitchen.timer = nil end
+        local text = _("Minutnik: gotowe · ") .. Kitchen.durLabel(tm.lo_s):lower()
+        local check = Kitchen.timerCheck(tm)
+        if check ~= "" then text = text .. "\n" .. check end
+        UIManager:show(InfoMessage:new { text = text })
+    end)
+end
+
+--- What survives a rail tap and a refresh and dies with the recipe or the
+--- day: the step on screen, the ingredient page, what is already in the pot.
+function Kitchen.cookState(cook)
+    local key = tostring(cook.id) .. "|" .. os.date("%Y-%m-%d")
+    local st = Kitchen.cook_state
+    if not st or st.key ~= key then
+        st = { key = key, step = 1, ing_page = 1, pot = {} }
+        Kitchen.cook_state = st
+    end
+    return st
+end
+
+--- A line through a widget: "already in the pot".
+function Kitchen.strike(widget)
+    local s = widget:getSize()
+    local line = hline(s.w, 2)
+    line.overlap_offset = { 0, math.floor(s.h / 2) }
+    return OverlapGroup:new { dimen = Geom:new { w = s.w, h = s.h }, widget, line }
+end
+
+--- "TERAZ · Zmywarka — rozładować   +3 ›": the first thing waiting, one tap
+--- from Zadania. Nothing waiting → no strip, the screen gets the room.
+function View:nowStrip(x0, y0, w)
+    local now = ((self.data or {}).tasks or {}).now
+    if type(now) ~= "table" or #now == 0 then return VerticalSpan:new { width = 0 }, 0 end
+    local h = zpx(40)
+    local right = (#now > 1 and ("+" .. (#now - 1) .. " ") or "") .. "›"
+    local right_w = ktext(right, 14, true):getSize().w
+    self:claim(x0, y0, x0 + w, y0 + h, { kind = "strip" })
+    return FrameContainer:new {
+        background = Blitbuffer.COLOR_BLACK, bordersize = 0, padding = 0, margin = 0, width = w, height = h,
+        HorizontalGroup:new { align = "center",
+            cell(w - right_w - px(14), h, ktext(_("TERAZ · ") .. tostring(now[1].text or ""), 14, true,
+                w - right_w - 3 * px(14), true), px(14)),
+            ktext(right, 14, true, nil, true),
+        },
+    }, h
+end
+
+--- "Curry z ciecierzycą  2 porcje · 35 min" and refresh. (A−/A+ sit on the
+--- rail since Q65, for every screen.)
+function View:cookHeader(x0, y0, w, c)
+    local h, pad = px(54), px(14)
+    local rw = px(46)
+    local left_w = w - 2 * pad - rw - px(10)
+    local notes = type(c.notes) == "table" and #c.notes > 0
+    local meta = tostring(c.meta or "")
+    if notes then meta = meta .. (meta ~= "" and " · " or "") .. _("uwagi ›") end
+    local meta_w = ktext(meta, 14, true):getSize().w
+    local title = ktext(c.title, 22, true, math.max(px(160), left_w - meta_w - px(12)))
+    local left = HorizontalGroup:new { align = "center", title, HorizontalSpan:new { width = px(12) },
+        ktext(meta, 14, true, math.max(1, left_w - title:getSize().w - px(12))) }
+    local refresh = Kitchen.refreshBtn()
+    local bx = x0 + pad + left_w + px(5)
+    self:claim(x0, y0, bx, y0 + h, { kind = notes and "notes" or "none" })
+    self:claim(bx, y0, x0 + w, y0 + h, { kind = "refresh" })
+    return VerticalGroup:new { align = "left",
+        HorizontalGroup:new { align = "center", cell(pad + left_w + px(10), h, left, pad), refresh },
+        hline(w, 3),
+    }, h + px(3)
+end
+
+--- One ingredient: ○ brak (not tappable) / ☐ still to go / ■ in the pot.
+function View:ingRow(ing, w, h, in_pot)
+    local pad, mark_w, gap = px(14), px(24), px(10)
+    local mark
+    if not ing.have then
+        mark = FrameContainer:new { bordersize = px(3), radius = px(12), padding = 0, margin = 0,
+            width = mark_w, height = mark_w, HorizontalSpan:new { width = 0 } }
+    elseif in_pot then
+        mark = FrameContainer:new { background = Blitbuffer.COLOR_BLACK, bordersize = 0, radius = px(5),
+            padding = 0, margin = 0, width = mark_w, height = mark_w,
+            cell(mark_w, mark_w, icon("k_check_w", px(14)), 0, true) }
+    else
+        mark = checkbox(24)
+    end
+    local bold = not in_pot
+    local right = ing.have and tostring(ing.amount or "") or _("brak")
+    local room = w - 2 * pad - mark_w - 2 * gap
+    local amount = ktext(right, 14, bold, math.floor(room * 0.45))
+    local name_w = room - amount:getSize().w
+    -- a row with a note ("zamiast: szalotka") carries two lines in the same
+    -- 48 px: the name steps down so both stay whole
+    local name = ktext(lowerKey(tostring(ing.name or "")), ing.note and 14 or 18, bold, name_w)
+    if in_pot then name = Kitchen.strike(name) end
+    local text = name
+    if ing.note then
+        text = VerticalGroup:new { align = "left", name, ktext(ing.note, 12, false, name_w) }
+    end
+    return VerticalGroup:new { align = "left",
+        cell(w, h - px(1), HorizontalGroup:new { align = "center",
+            mark, HorizontalSpan:new { width = gap },
+            cell(name_w, h - px(1), text, 0), HorizontalSpan:new { width = gap },
+            amount,
+        }, pad),
+        hline(w),
+    }
+end
+
+--- SKŁADNIKI 1–6 Z 10 · BRAK 1, six to a page, ‹ 1 z 2 › under them.
+function View:cookIngredients(x0, y0, w, h, c, st)
+    local ings = type(c.ingredients) == "table" and c.ingredients or {}
+    local n, missing = #ings, 0
+    for _i, ing in ipairs(ings) do if not ing.have then missing = missing + 1 end end
+    local bh, row_h, pager_h = zpx(24), zpx(48), px(69)
+    -- six to a page as drawn (more when A− makes them smaller); a list that
+    -- fits whole gets no pager at all
+    local fit = math.max(1, math.min(math.floor(6 / Kitchen.zoom() + 0.5), math.floor((h - bh - pager_h) / row_h)))
+    if n * row_h <= h - bh then fit = math.max(1, n) end
+    local pages = math.max(1, math.ceil(n / fit))
+    st.ing_page = math.min(math.max(1, st.ing_page or 1), pages)
+    local first = (st.ing_page - 1) * fit + 1
+    local last = math.min(n, first + fit - 1)
+    local label = pages > 1 and string.format(_("SKŁADNIKI %d–%d Z %d"), first, last, n) or (_("SKŁADNIKI · ") .. n)
+    if missing > 0 then label = label .. _(" · BRAK ") .. missing end
+    local g = VerticalGroup:new { align = "left", band(w, label) }
+    local y, used = y0 + bh, bh
+    for i = first, last do
+        local ing = ings[i]
+        table.insert(g, self:ingRow(ing, w, row_h, st.pot[ing.name]))
+        if ing.have then self:claim(x0, y, x0 + w, y + row_h, { kind = "pot", name = ing.name }) end
+        y, used = y + row_h, used + row_h
+    end
+    if n == 0 then
+        table.insert(g, cell(w, row_h, ktext(_("Bez listy składników."), 14, false, w - 2 * px(14)), px(14)))
+        used = used + row_h
+    end
+    if pages > 1 then
+        table.insert(g, VerticalSpan:new { width = h - used - pager_h })
+        local bw, mid = px(64), w - 2 * px(14) - 2 * px(64)
+        table.insert(g, hline(w))
+        table.insert(g, cell(w, pager_h - px(1), HorizontalGroup:new { align = "center",
+            button(bw, px(50), "‹", 22, false),
+            cell(mid, px(50), ktext(string.format(_("%d z %d"), st.ing_page, pages), 14, true, mid), 0, true),
+            button(bw, px(50), "›", 22, true),
+        }, px(14)))
+        local py, half = y0 + h - pager_h, x0 + math.floor(w / 2)
+        self:claim(x0, py, half, y0 + h, { kind = "ing_page", to = (st.ing_page - 2) % pages + 1 })
+        self:claim(half, py, x0 + w, y0 + h, { kind = "ing_page", to = st.ing_page % pages + 1 })
+    else
+        table.insert(g, VerticalSpan:new { width = h - used })
+    end
+    return FrameContainer:new { bordersize = 0, padding = 0, margin = 0, width = w, height = h, g }
+end
+
+--- The minute-timer line under a step: START per length in the text, then
+--- "MINUTNIK · 10 MIN / gotowe o 15:22" with ZATRZYMAJ — an end time, nothing
+--- ticking — then GOTOWE until it is tapped away.
+--- @return widget|nil, height, { { x1, x2, target }, … } with x inside the row
+function View:timerRow(w, step, st)
+    local tm = Kitchen.timer
+    local h = zpx(46)
+    if tm and tm.done then
+        local hd, ok_w = zpx(60), px(64)
+        local text_w = w - ok_w - 3 * px(12)
+        local text = VerticalGroup:new { align = "left",
+            ktext(_("GOTOWE · ") .. Kitchen.durLabel(tm.lo_s), 18, true, text_w, true) }
+        local check = Kitchen.timerCheck(tm)
+        if check ~= "" then table.insert(text, ktext(check, 14, true, text_w, true)) end
+        return FrameContainer:new {
+            background = Blitbuffer.COLOR_BLACK, bordersize = 0, radius = px(8), padding = 0, margin = 0,
+            width = w, height = hd,
+            HorizontalGroup:new { align = "center",
+                cell(w - ok_w - px(12), hd, text, px(12)),
+                button(ok_w, px(44), _("OK"), 14, false),
+            },
+        }, hd, { { 0, w, { kind = "timer_ok" } } }
+    end
+    if tm then
+        local stop = _("ZATRZYMAJ")
+        local bw = ktext(stop, 14, true):getSize().w + 2 * px(14) + 2 * px(3)
+        local text_w = w - bw - px(10)
+        local line2 = _("gotowe o ") .. os.date("%H:%M", tm.ends_at)
+        local check = Kitchen.timerCheck(tm)
+        if check ~= "" then line2 = line2 .. " · " .. check end
+        local two = VerticalGroup:new { align = "left",
+            ktext(_("MINUTNIK · ") .. Kitchen.durLabel(tm.lo_s), 14, true, text_w),
+            ktext(line2, 14, false, text_w),
+        }
+        h = math.max(h, two:getSize().h) -- two lines of text set the row, not the drawn 46
+        return HorizontalGroup:new { align = "center",
+            cell(text_w + px(10), h, two, 0),
+            button(bw, zpx(46), stop, 14, false),
+        }, h, { { text_w, w, { kind = "timer_stop" } } }
+    end
+    -- one START per length (Q58); a range starts at its low end
+    local btns, seen, used = {}, {}, 0
+    for _i, t in ipairs(type(step.timers) == "table" and step.timers or {}) do
+        local lo, hi = tonumber(t.lo_s) or 0, tonumber(t.hi_s) or 0
+        local id = lo .. "-" .. hi
+        if lo > 0 and not seen[id] then
+            seen[id] = true
+            local label = _("START ") .. Kitchen.durLabel(lo)
+            local bw = ktext(label, 14, true):getSize().w + 2 * px(14) + 2 * px(3)
+            local gap = #btns > 0 and px(8) or 0
+            if used + gap + bw > w then break end
+            btns[#btns + 1] = { label = label, w = bw, gap = gap, lo = lo, hi = hi }
+            used = used + gap + bw
+        end
+    end
+    if #btns == 0 then return nil, 0, {} end
+    local row = HorizontalGroup:new { align = "center" }
+    local claims = {}
+    local note_w = w - used - px(10)
+    local l1, l2 = _("Minutnik pokaże godzinę końca,"), _("bez tykania na ekranie.")
+    if note_w >= ktext(l1, 14, false):getSize().w then
+        local two = VerticalGroup:new { align = "left", ktext(l1, 14, false, note_w), ktext(l2, 14, false, note_w) }
+        h = math.max(h, two:getSize().h)
+        table.insert(row, cell(note_w + px(10), h, two, 0))
+    else
+        table.insert(row, HorizontalSpan:new { width = w - used })
+    end
+    local x = w - used
+    for _i, b in ipairs(btns) do
+        if b.gap > 0 then table.insert(row, HorizontalSpan:new { width = b.gap }) end
+        table.insert(row, button(b.w, zpx(46), b.label, 14, false))
+        claims[#claims + 1] = { x + math.floor(b.gap / 2), x + b.gap + b.w + px(4),
+            { kind = "timer_start", lo_s = b.lo, hi_s = b.hi, step = st.step } }
+        x = x + b.gap + b.w
+    end
+    claims[#claims][2] = w
+    return row, h, claims
+end
+
+--- KROK 4 Z 5: the step in type read from the stove, what goes in at this
+--- step, the timer line, and ‹ KROK 3 | KROK 5 ›. The text shrinks before
+--- anything is cut; the ingredient lines go before the text does.
+function View:cookStep(x0, y0, w, h, c, st)
+    local TextBoxWidget = require("ui/widget/textboxwidget")
+    local steps = type(c.steps) == "table" and c.steps or {}
+    local n = #steps
+    st.step = math.min(math.max(1, st.step or 1), math.max(1, n))
+    local i = st.step
+    local bh, nav_h, pad = zpx(24), px(69), px(14)
+    local iw = w - 2 * pad
+    local done = ""
+    if i > 1 then
+        local nums = {}
+        for k = 1, i - 1 do nums[k] = tostring(k) end
+        done = _("GOTOWE: ") .. (i - 1 <= 5 and table.concat(nums, " · ") or ("1–" .. (i - 1)))
+    end
+    local done_w = done ~= "" and ktext(done, 12, true):getSize().w or 0
+    local head = FrameContainer:new {
+        background = Blitbuffer.COLOR_BLACK, bordersize = 0, padding = 0, margin = 0, width = w, height = bh,
+        HorizontalGroup:new { align = "center",
+            cell(w - done_w - pad, bh, ktext(n > 0 and string.format(_("KROK %d Z %d"), i, n) or _("KROKI"),
+                12, true, w - done_w - 3 * pad, true), pad),
+            ktext(done, 12, true, nil, true),
+        },
+    }
+    if n == 0 then
+        return FrameContainer:new { bordersize = 0, padding = 0, margin = 0, width = w, height = h,
+            VerticalGroup:new { align = "left", head,
+                cell(w, h - bh, ktext(_("Ten przepis nie ma kroków."), 18, true, iw), 0, true) } }
+    end
+    local step = steps[i]
+    local mh = h - bh - nav_h
+    local trow, th, tclaims = self:timerRow(iw, step, st)
+    local lines = {}
+    for _k, idx in ipairs(type(step.ings) == "table" and step.ings or {}) do
+        local ing = (c.ingredients or {})[(tonumber(idx) or -1) + 1] -- the server counts from 0
+        if ing and #lines < 4 then lines[#lines + 1] = ing end
+    end
+    local gap, lh = px(14), zpx(34)
+    local function listH(k) return k == 0 and 0 or (gap + 2 * px(3) + k * lh + (k - 1) * px(1)) end
+    local fixed = (th > 0 and (gap + th) or 0) + 2 * px(8)
+    local size, keep = 28, #lines
+    local box, text_h
+    while true do
+        box = TextBoxWidget:new { text = tostring(step.text or ""), face = kface(size), bold = true,
+            width = iw, alignment = "left" }
+        text_h = box:getSize().h
+        if text_h + listH(keep) + fixed <= mh then break end
+        if box.free then pcall(function() box:free() end) end
+        if size > 18 then
+            size = math.max(18, size - 2)
+        elseif keep > 0 then
+            keep = keep - 1
+        else
+            text_h = mh - fixed
+            box = TextBoxWidget:new { text = tostring(step.text or ""), face = kface(size), bold = true,
+                width = iw, alignment = "left", height = text_h, height_overflow_show_ellipsis = true }
+            break
+        end
+    end
+    local col = VerticalGroup:new { align = "left", box }
+    local used = text_h
+    if keep > 0 then
+        table.insert(col, VerticalSpan:new { width = gap })
+        table.insert(col, hline(iw, 3))
+        for k = 1, keep do
+            if k > 1 then table.insert(col, hline(iw)) end
+            local amount = ktext(lines[k].have and (lines[k].amount or "") or _("brak"), 18, true, math.floor(iw * 0.4))
+            local name_w = iw - amount:getSize().w - px(10)
+            table.insert(col, HorizontalGroup:new { align = "center",
+                cell(name_w + px(10), lh, ktext(lowerKey(tostring(lines[k].name or "")), 18, false, name_w), 0),
+                amount })
+        end
+        table.insert(col, hline(iw, 3))
+        used = used + listH(keep)
+    end
+    local top_pad = math.floor((mh - used - (trow and (gap + th) or 0)) / 2)
+    if trow then
+        table.insert(col, VerticalSpan:new { width = gap })
+        table.insert(col, trow)
+        local ty = y0 + bh + top_pad + used + gap
+        for _k, cl in ipairs(tclaims) do
+            self:claim(x0 + pad + cl[1], ty - px(6), x0 + pad + cl[2], ty + th + px(6), cl[3])
+        end
+        used = used + gap + th
+    end
+    local prev_w = i > 1 and px(116) or 0
+    local split = x0 + pad + prev_w + px(4)
+    local nav = HorizontalGroup:new { align = "center" }
+    local ny = y0 + h - nav_h
+    if i > 1 then
+        table.insert(nav, button(prev_w, px(50), string.format(_("‹ KROK %d"), i - 1), 14, false))
+        table.insert(nav, HorizontalSpan:new { width = px(8) })
+        self:claim(x0, ny, split, y0 + h, { kind = "step", to = i - 1 })
+    end
+    table.insert(nav, button(iw - (i > 1 and (prev_w + px(8)) or 0), px(50),
+        i == n and _("UGOTOWANE ›") or string.format(_("KROK %d ›"), i + 1), 18, true))
+    self:claim(i > 1 and split or x0, ny, x0 + w, y0 + h, i == n and { kind = "cook_end" } or { kind = "step", to = i + 1 })
+    return FrameContainer:new { bordersize = 0, padding = 0, margin = 0, width = w, height = h,
+        VerticalGroup:new { align = "left",
+            head,
+            VerticalSpan:new { width = top_pad },
+            HorizontalGroup:new { align = "top", HorizontalSpan:new { width = pad }, col },
+            VerticalSpan:new { width = mh - used - top_pad },
+            hline(w),
+            cell(w, nav_h - px(1), nav, pad),
+        } }
+end
+
+function View:buildCook(x0, w, H)
+    local c = (self.data or {}).cook
+    local strip, sh = self:nowStrip(x0, 0, w)
+    if type(c) ~= "table" then
+        return VerticalGroup:new { align = "left", strip,
+            cell(w, H - sh, VerticalGroup:new { align = "center",
+                ktext(_("Dziś nic z przepisem."), 22, true, w - 2 * px(14)),
+                ktext(_("Przepis na inny dzień wybierzesz w Planie."), 14, false, w - 2 * px(14)),
+            }, 0, true) }
+    end
+    local st = Kitchen.cookState(c)
+    local header, hh = self:cookHeader(x0, sh, w, c)
+    local top = sh + hh
+    local lw = px(276) - px(3)
+    return VerticalGroup:new { align = "left",
+        strip, header,
+        HorizontalGroup:new { align = "top",
+            self:cookIngredients(x0, top, lw, H - top, c, st),
+            vline(H - top),
+            self:cookStep(x0 + lw + px(3), top, w - lw - px(3), H - top, c, st),
+        },
+    }
+end
+
+--- Taps of Gotuj; true when the tap was one of them.
+function View:cookTap(t)
+    local st = Kitchen.cook_state
+    if t.kind == "pot" and st then
+        st.pot[t.name] = (not st.pot[t.name]) or nil
+    elseif t.kind == "ing_page" and st then
+        st.ing_page = t.to
+    elseif t.kind == "step" and st then
+        st.step = t.to
+        track("kuchnia", "step", tostring(t.to))
+    elseif t.kind == "timer_start" then
+        Kitchen.timerStart(t.lo_s, t.hi_s, t.step)
+        track("kuchnia", "timer", tostring(t.lo_s))
+    elseif t.kind == "timer_stop" or t.kind == "timer_ok" then
+        Kitchen.timerStop()
+    elseif t.kind == "notes" then
+        local items = {}
+        for _i, note in ipairs(((self.data or {}).cook or {}).notes or {}) do
+            items[#items + 1] = { text = tostring(note), inert = true }
+        end
+        self.plugin:showList(_("UWAGI"), items)
+        return true
+    elseif t.kind == "strip" then
+        self.screen = "tasks"
+        track("kuchnia", "screen", "tasks")
+    elseif t.kind == "cook_end" then
+        self.screen, self.pantry_used = "pantry", true
+        track("kuchnia", "cooked")
+    else
+        return false
+    end
+    self:redraw()
+    return true
+end
+
+-- ---- E3 Spiżarnia: what today's meal needs, what runs low, the rest — ZUŻYTE never shops
+
+ICON_SVG.k_check = phosphor("M232.49,80.49l-128,128a12,12,0,0,1-17,0l-56-56a12,12,0,1,1,17-17L96,183,215.51,63.51a12,12,0,0,1,17,17Z")
+ICON_SVG.k_x = phosphor("M208.49,191.51a12,12,0,0,1-17,17L128,145,64.49,208.49a12,12,0,0,1-17-17L111,128,47.51,64.49a12,12,0,0,1,17-17L128,111l63.51-63.52a12,12,0,0,1,17,17L145,128Z")
+
+function Kitchen.copy(t)
+    local out = {}
+    for k, v in pairs(t or {}) do out[k] = v end
+    return out
+end
+
+--- Only real strings and numbers: KOReader decodes JSON null as a truthy sentinel.
+function Kitchen.str(x)
+    if type(x) == "string" then return x end
+    if type(x) == "number" then return tostring(x) end
+    return ""
+end
+
+--- 2.5 → "2,5", 4 → "4", 0.333 → "0,33" (the server's decimal comma).
+function Kitchen.num(x)
+    local s = string.format("%.2f", tonumber(x) or 0):gsub("0+$", ""):gsub("%.$", "")
+    return (s:gsub("%.", ","))
+end
+
+--- "8:05", not "08:05" — the way the server writes `at`.
+function Kitchen.clock(t)
+    return (os.date("%H:%M", t or os.time()):gsub("^0(%d)", "%1"))
+end
+
+--- A copy of the payload whose pantry `fn` may change in place.
+function Kitchen.withPantry(data, fn)
+    local out = Kitchen.copy(data)
+    out.pantry = Kitchen.copy(type((data or {}).pantry) == "table" and data.pantry or {})
+    fn(out.pantry)
+    return out
+end
+
+--- A button as wide as its label needs, never under the drawn `min_w`:
+--- A+ makes the words bigger, so the buttons grow rather than cut them.
+function Kitchen.btnW(label, n, min_w)
+    return math.max(min_w or 0, ktext(label, n, true):getSize().w + 2 * px(10) + 2 * px(3))
+end
+
+function Kitchen.refreshBtn()
+    return FrameContainer:new {
+        background = Blitbuffer.COLOR_WHITE, bordersize = px(3), radius = px(8), padding = 0, margin = 0,
+        width = px(46), height = px(44),
+        cell(px(46) - 2 * px(3), px(44) - 2 * px(3), icon("k_refresh", px(18)), 0, true),
+    }
+end
+
+--- −1 only where one less is a thing you can take out: 2 puszki, 6 szt.
+--- Not 500 g (minus one gram) and not the last one (that is ZUŻYTE).
+Kitchen.WEIGHED = { g = true, dag = true, ml = true }
+function Kitchen.minusOne(r)
+    if (tonumber(r.qty) or -1) <= 1 then return false end
+    local unit = lowerKey(Kitchen.str(r.amount)):match("^[%d,%.]+%s*(.-)%s*$") or ""
+    return not Kitchen.WEIGHED[unit]
+end
+
+Kitchen.MEAL_GEN = { obiad = "OBIADU", kolacja = "KOLACJI", ["śniadanie"] = "ŚNIADANIA",
+    ["drugie śniadanie"] = "DRUGIEGO ŚNIADANIA" }
+
+--- Sections → columns of { band = label } / { row = entry }. A column ends
+--- when the next row does not fit; a section that runs on repeats its band,
+--- and a band never sits alone at the foot of a column.
+function Kitchen.flow(sections, col_h, band_h, row_h)
+    local cols, cur, left, banded = {}, nil, 0, false
+    for _i, s in ipairs(sections) do
+        banded = false
+        for _k, r in ipairs(s.rows) do
+            if not cur or (#cur > 0 and left < row_h + (banded and 0 or band_h)) then
+                cur = {}
+                cols[#cols + 1] = cur
+                left, banded = col_h, false
+            end
+            if not banded then
+                cur[#cur + 1] = { band = s.label }
+                left, banded = left - band_h, true
+            end
+            cur[#cur + 1] = { row = r }
+            left = left - row_h
+        end
+    end
+    return cols
+end
+
+--- Left: POTRZEBNE DZIŚ DO OBIADU. Right: KOŃCZY SIĘ, RESZTA. What was used
+--- today heads its section (struck, COFNIJ, + ZAKUPY); a −1 that can no longer
+--- be undone has nothing left to offer and stays off the screen.
+function View:pantrySections()
+    local d = self.data or {}
+    local p = type(d.pantry) == "table" and d.pantry or {}
+    local place = self.place
+    local function here(x) return not place or x.place == place end
+    local for_meal = {}
+    local ings = type(d.cook) == "table" and d.cook.ingredients
+    for _i, ing in ipairs(type(ings) == "table" and ings or {}) do
+        if tonumber(ing.item_id) then for_meal[ing.item_id] = true end
+    end
+    local need, rest = {}, {}
+    for _i, u in ipairs(type(p.consumed) == "table" and p.consumed or {}) do
+        if here(u) and not (u.partial and not u.undoable) then
+            local into = (u.needed == true or for_meal[u.item_id]) and need or rest
+            into[#into + 1] = { used = u }
+        end
+    end
+    local function live(rows, out)
+        local n = 0
+        for _i, r in ipairs(type(rows) == "table" and rows or {}) do
+            if here(r) then out[#out + 1] = r; n = n + 1 end
+        end
+        return out, n
+    end
+    local low, n_low = live(p.low, {})
+    local _r, n_rest = live(p.rest, rest)
+    live(p.needed, need)
+    local gen = Kitchen.MEAL_GEN[lowerKey(Kitchen.str((d.meal or {}).label))]
+    local label = gen and (_("POTRZEBNE DZIŚ DO ") .. gen) or _("POTRZEBNE DZIŚ")
+    return { { label = label, rows = need } },
+        { { label = _("KOŃCZY SIĘ · ") .. n_low, rows = low }, { label = _("RESZTA · ") .. n_rest, rows = rest } }
+end
+
+--- "Spiżarnia  stan na 14:30 · zużyte dziś: 2 ›"   ZAKUPY · 4 ›   ⟳
+function View:pantryHeader(x0, y0, w, p)
+    local h, pad, gap = px(54), px(14), px(8)
+    local shop = _("ZAKUPY · ") .. tostring(tonumber(p.shopping_open) or 0) .. " ›"
+    local sw = Kitchen.btnW(shop, 14, 0)
+    local n_used = #(type(p.consumed) == "table" and p.consumed or {})
+    local left_w = w - pad - sw - gap - px(46) - pad
+    local title = ktext(_("Spiżarnia"), 22, true, left_w - pad)
+    -- two targets (rule 6): "stan na …" → settings, "zużyte dziś: n ›" → the list
+    local room = math.max(1, left_w - pad - title:getSize().w - px(12))
+    local used = n_used > 0 and ktext(_("zużyte dziś: ") .. n_used .. " ›", 14, true, math.floor(room / 2)) or nil
+    local used_w = used and (used:getSize().w + px(12)) or 0
+    local status = ktext(Kitchen.status(self) .. " ›", 14, false, math.max(1, room - used_w))
+    local left = HorizontalGroup:new { align = "center", title, HorizontalSpan:new { width = px(12) }, status }
+    if used then
+        table.insert(left, HorizontalSpan:new { width = px(12) })
+        table.insert(left, used)
+    end
+    local bx = x0 + left_w
+    local split = used and (x0 + pad + title:getSize().w + px(12) + status:getSize().w + math.floor(px(12) / 2)) or bx
+    self:claim(x0, y0, split, y0 + h, { kind = "settings" })
+    if used then self:claim(split, y0, bx, y0 + h, { kind = "used_list" }) end
+    self:claim(bx, y0, bx + sw + math.floor(gap / 2), y0 + h, { kind = "shopping" })
+    self:claim(bx + sw + math.floor(gap / 2), y0, x0 + w, y0 + h, { kind = "refresh" })
+    return HorizontalGroup:new { align = "center",
+        cell(left_w, h, left, pad),
+        button(sw, px(44), shop, 14, false), HorizontalSpan:new { width = gap },
+        Kitchen.refreshBtn(),
+    }, h
+end
+
+--- WSZYSTKO | LODÓWKA | SZAFKA | MROŻONE, as wide as their words.
+function View:pantryChips(x0, y0, w, p)
+    local chips = { { label = _("WSZYSTKO") } }
+    for _i, pl in ipairs(type(p.places) == "table" and p.places or {}) do
+        if Kitchen.str(pl.name) ~= "" then chips[#chips + 1] = { label = pl.name, place = pl.name } end
+    end
+    local pad, gap, ch = px(14), px(6), px(44)
+    local h = ch + px(8)
+    local row = HorizontalGroup:new { align = "center" }
+    local x = x0 + pad
+    for i, c in ipairs(chips) do
+        local cw = Kitchen.btnW(c.label, 12, px(64)) + 2 * px(6)
+        local g = i > 1 and gap or 0
+        if x + g + cw > x0 + w - pad then break end
+        if g > 0 then table.insert(row, HorizontalSpan:new { width = g }) end
+        table.insert(row, button(cw, ch, c.label, 12, c.place == self.place))
+        self:claim(x + g - math.floor(g / 2), y0, x + g + cw + math.floor(gap / 2), y0 + h,
+            { kind = "place", place = c.place })
+        x = x + g + cw
+    end
+    return VerticalGroup:new { align = "left", cell(w, ch, row, pad), VerticalSpan:new { width = px(8) } }, h
+end
+
+--- One pantry line: name + amount, −1 and ZUŻYTE; or what was used today,
+--- struck, with COFNIJ and + ZAKUPY.
+function View:pantryRow(x0, y, w, h, e)
+    local pad, gap, bh = px(12), px(6), px(44)
+    local btns = {}
+    local name, line2, mark
+    local u = e.used
+    if u then
+        name = lowerKey(Kitchen.str(u.name))
+        local at = Kitchen.str(u.at)
+        line2 = u.partial and (_("odjęte ") .. at .. _(" · było ") .. Kitchen.str(u.amount)) or (_("zużyte ") .. at)
+        if u.on_list == true then
+            line2 = line2 .. _(" · jest na ZAKUPACH")
+            mark = true
+        end
+        if u.undoable == true then
+            btns[#btns + 1] = { label = _("COFNIJ"), min = px(70), t = { kind = "p_undo", undo_id = u.undo_id, name = name } }
+        end
+        if not u.partial and u.on_list ~= true then
+            btns[#btns + 1] = { label = _("+ ZAKUPY"), min = px(86), on = true,
+                t = { kind = "p_shop", undo_id = u.undo_id, name = name } }
+        end
+    else
+        name = lowerKey(Kitchen.str(e.name))
+        line2 = Kitchen.str(e.amount)
+        local meta = Kitchen.str(e.meta)
+        if meta ~= "" then line2 = line2 ~= "" and (line2 .. " · " .. meta) or meta end
+        if Kitchen.minusOne(e) then
+            btns[#btns + 1] = { label = "−1", min = px(46), t = { kind = "p_use", id = e.id, amount = 1, name = name } }
+        end
+        btns[#btns + 1] = { label = _("ZUŻYTE"), min = px(78), t = { kind = "p_use", id = e.id, name = name } }
+    end
+    local bw = 0
+    for _i, b in ipairs(btns) do
+        b.w = Kitchen.btnW(b.label, 12, b.min)
+        bw = bw + gap + b.w
+    end
+    local text_w = math.max(px(40), w - 2 * pad - bw)
+    local nw = ktext(name, 14, not u, text_w)
+    if u and not u.partial then nw = Kitchen.strike(nw) end
+    local text = VerticalGroup:new { align = "left", nw }
+    if line2 ~= "" then
+        local mw = mark and px(14) + px(4) or 0
+        local l2 = ktext(line2, 12, u and true or false, text_w - mw)
+        if mark then l2 = HorizontalGroup:new { align = "center", icon("k_check", px(14)), HorizontalSpan:new { width = px(4) }, l2 } end
+        table.insert(text, l2)
+    end
+    local row = HorizontalGroup:new { align = "center", cell(text_w, h - px(1), text, 0) }
+    local x = x0 + pad + text_w
+    for i, b in ipairs(btns) do
+        table.insert(row, HorizontalSpan:new { width = gap })
+        table.insert(row, button(b.w, bh, b.label, 12, b.on))
+        local x2 = i == #btns and (x0 + w) or (x + gap + b.w + math.floor(gap / 2))
+        self:claim(x + math.floor(gap / 2), y, x2, y + h, b.t)
+        x = x + gap + b.w
+    end
+    return VerticalGroup:new { align = "left", cell(w, h - px(1), row, pad), hline(w) }
+end
+
+function View:pantryColumn(x0, y0, w, h, col, row_h)
+    local g = VerticalGroup:new { align = "left" }
+    local y = y0
+    for _i, it in ipairs(col or {}) do
+        if it.band then
+            table.insert(g, band(w, it.band))
+            y = y + zpx(24)
+        else
+            table.insert(g, self:pantryRow(x0, y, w, row_h, it.row))
+            y = y + row_h
+        end
+    end
+    return FrameContainer:new { bordersize = 0, padding = 0, margin = 0, width = w, height = h, g }
+end
+
+--- "strona 1 z 3 · ZUŻYTE nie dopisuje nic do zakupów — robi to dopiero + ZAKUPY"  ‹ ›
+--- For two minutes after + ZAKUPY: "✓ pasta curry na ZAKUPACH  COFNIJ" (Q61).
+function View:pantryFooter(x0, y0, w, h, page, pages)
+    local pad = px(14)
+    local nav_w = pages > 1 and (2 * px(60) + px(8)) or 0
+    local text_w = w - 2 * pad - nav_w - (nav_w > 0 and px(12) or 0)
+    local last = self.shop_last
+    local left
+    if last and (os.time() - last.at) < UNDO_S then
+        if last.undone then
+            left = ktext(_("Cofnięte: ") .. last.name, 14, true, text_w)
+        else
+            local cw = Kitchen.btnW(_("COFNIJ"), 12, px(70))
+            left = HorizontalGroup:new { align = "center",
+                ktext("✓ " .. last.name .. _(" na ZAKUPACH"), 14, true, text_w - cw - px(10)),
+                HorizontalSpan:new { width = px(10) },
+                button(cw, px(44), _("COFNIJ"), 12, false) }
+            self:claim(x0, y0, x0 + pad + text_w + math.floor(px(12) / 2), y0 + h, { kind = "p_shop_undo" })
+        end
+    else
+        local pg = pages > 1 and string.format(_("strona %d z %d"), page, pages) or ""
+        local sep = pg ~= "" and (pg .. " · ") or ""
+        local text = pg
+        for _i, s in ipairs { sep .. _("ZUŻYTE nie dopisuje nic do zakupów — robi to dopiero + ZAKUPY"),
+                sep .. _("ZUŻYTE nie dopisuje do zakupów") } do
+            if ktext(s, 12, false):getSize().w <= text_w then text = s; break end
+        end
+        left = ktext(text, 12, false, text_w)
+    end
+    local row = HorizontalGroup:new { align = "center", cell(text_w, h, left, 0) }
+    if pages > 1 then
+        table.insert(row, HorizontalSpan:new { width = px(12) })
+        table.insert(row, button(px(60), px(44), "‹", 18, false))
+        table.insert(row, HorizontalSpan:new { width = px(8) })
+        table.insert(row, button(px(60), px(44), "›", 18, true))
+        local nx = x0 + pad + text_w + px(12)
+        local mid = nx + px(60) + math.floor(px(8) / 2)
+        self:claim(nx - math.floor(px(12) / 2), y0, mid, y0 + h, { kind = "p_page", to = (page - 2) % pages + 1 })
+        self:claim(mid, y0, x0 + w, y0 + h, { kind = "p_page", to = page % pages + 1 })
+    end
+    return cell(w, h, row, pad)
+end
+
+function View:buildPantry(x0, w, H)
+    local d = self.data or {}
+    local p = type(d.pantry) == "table" and d.pantry or {}
+    if self.place then -- a place that emptied out since the tap
+        local ok = false
+        for _i, pl in ipairs(type(p.places) == "table" and p.places or {}) do
+            if pl.name == self.place then ok = true end
+        end
+        if not ok then self.place = nil end
+    end
+    local strip, sh = self:nowStrip(x0, 0, w)
+    local header, hh = self:pantryHeader(x0, sh, w, p)
+    local chips, chh = self:pantryChips(x0, sh + hh, w, p)
+    local top = sh + hh + chh
+    local foot_h = px(58)
+    local ch = H - top - 2 * px(3) - foot_h
+    local y0 = top + px(3)
+    local lw = math.floor((w - px(3)) / 2)
+    local rw = w - px(3) - lw
+    local row_h = math.max(zpx(54), px(48))
+    local a, b = self:pantrySections()
+    local ca, cb = Kitchen.flow(a, ch, zpx(24), row_h), Kitchen.flow(b, ch, zpx(24), row_h)
+    -- page 1 = POTRZEBNE | the start of the right side; once POTRZEBNE runs
+    -- out, the right side fills both columns
+    local pages = math.max(1, #ca, math.ceil((#ca + #cb) / 2))
+    local page = math.min(math.max(1, self.pantry_page or 1), pages)
+    self.pantry_page = page
+    local skip = 2 * (page - 1) - math.min(page - 1, #ca)
+    local left, right = ca[page], cb[skip + 1]
+    if not left then left, right = cb[skip + 1], cb[skip + 2] end
+    local body
+    if #ca + #cb == 0 then
+        body = cell(w, ch, ktext(self.place and _("Nic w tym miejscu.") or _("Spiżarnia jest pusta."), 18, true,
+            w - 2 * px(14)), 0, true)
+    else
+        body = HorizontalGroup:new { align = "top",
+            self:pantryColumn(x0, y0, lw, ch, left, row_h),
+            vline(ch),
+            self:pantryColumn(x0 + lw + px(3), y0, rw, ch, right, row_h),
+        }
+    end
+    return VerticalGroup:new { align = "left", strip, header, chips, hline(w, 3), body, hline(w, 3),
+        self:pantryFooter(x0, y0 + ch + px(3), w, foot_h, page, pages) }
+end
+
+-- ---- pantry acts: the server answers, the screen changes at once, the refetch confirms
+
+--- After ZUŻYTE / −1. `c` = the server's `consumed`; nil after a 404 (the row is gone).
+function Kitchen.afterConsume(data, id, c)
+    return Kitchen.withPantry(data, function(p)
+        local before, was_needed
+        local keep = c and not c.finished and tonumber(c.quantity)
+        local function pass(rows, needed)
+            local out = {}
+            for _i, r in ipairs(type(rows) == "table" and rows or {}) do
+                if r.id ~= id then
+                    out[#out + 1] = r
+                else
+                    before = before or r
+                    was_needed = was_needed or needed
+                    if keep then
+                        local q = Kitchen.copy(r)
+                        q.qty = keep
+                        q.amount = (Kitchen.str(r.amount):gsub("^[%d,%.]+", Kitchen.num(keep)))
+                        out[#out + 1] = q
+                    end
+                end
+            end
+            return out
+        end
+        p.needed, p.low, p.rest = pass(p.needed, true), pass(p.low), pass(p.rest)
+        if before and not keep then p.total = math.max(0, (tonumber(p.total) or 1) - 1) end
+        if not c then return end
+        local e = { undo_id = c.undo_id, item_id = id, name = Kitchen.str(c.name) ~= "" and c.name or (before or {}).name,
+            amount = (before or {}).amount, place = (before or {}).place, partial = not c.finished,
+            at = Kitchen.clock(), on_list = false, undoable = true, needed = was_needed or nil }
+        local list = { e }
+        for _i, u in ipairs(type(p.consumed) == "table" and p.consumed or {}) do
+            if u.item_id == id and u.undoable == true then
+                u = Kitchen.copy(u)
+                u.undoable = false -- the newer −1 makes it stale (the server's 409)
+            end
+            list[#list + 1] = u
+        end
+        p.consumed = list
+    end)
+end
+
+--- The consumed entry `undo_id` with `fields` merged in; fields = nil drops it.
+function Kitchen.markUsed(data, undo_id, fields)
+    return Kitchen.withPantry(data, function(p)
+        local list = {}
+        for _i, u in ipairs(type(p.consumed) == "table" and p.consumed or {}) do
+            if u.undo_id ~= undo_id then
+                list[#list + 1] = u
+            elseif fields then
+                u = Kitchen.copy(u)
+                for k, v in pairs(fields) do u[k] = v end
+                list[#list + 1] = u
+            end
+        end
+        p.consumed = list
+    end)
+end
+
+--- ZAKUPY · n and its list, one name in (+1) or out (−1).
+function Kitchen.shopDelta(data, name, delta)
+    return Kitchen.withPantry(data, function(p)
+        p.shopping_open = math.max(0, (tonumber(p.shopping_open) or 0) + delta)
+        local list, gone = {}, false
+        if delta > 0 then list[1] = name end
+        for _i, s in ipairs(type(p.shopping) == "table" and p.shopping or {}) do
+            if delta < 0 and not gone and lowerKey(Kitchen.str(s)) == lowerKey(Kitchen.str(name)) then
+                gone = true
+            else
+                list[#list + 1] = s
+            end
+        end
+        p.shopping = list
+    end)
+end
+
+function Kitchen.pantryError(kind, err)
+    if err == "HTTP 409" then
+        if kind == "p_shop_undo" then return _("Już kupione albo zdjęte z listy.") end
+        return _("Zmienione po drodze. Cofnij w Foood.")
+    end
+    if err == "HTTP 404" then
+        if kind == "p_use" then return _("Tego już nie ma w spiżarni.") end
+        if kind == "p_shop" then return _("Nie da się dopisać. Dopisz w Foood.") end
+        if kind == "p_shop_undo" then return _("Już kupione albo zdjęte z listy.") end
+        return _("Nie ma już czego cofać.")
+    end
+    return _("Nie zapisano — brak połączenia.")
+end
+
+function View:pantryAct(t)
+    -- a queued double tap must not use up the row that slid into this place
+    local now = os.time()
+    if self.busy or now - (self.acted_at or 0) <= 1 then return end
+    local last = self.shop_last
+    if t.kind == "p_shop_undo" and (not last or last.undone) then return end
+    self.busy = true
+    local res, err, msg
+    if t.kind == "p_use" then
+        track("kuchnia", t.amount and "minus" or "used", tostring(t.id))
+        res, err = self.plugin:act("consume", t.id, { amount = t.amount, label = t.name })
+        if res and type(res.consumed) == "table" then
+            self.data = Kitchen.afterConsume(self.data, t.id, res.consumed)
+        elseif err == "HTTP 404" then
+            self.data = Kitchen.afterConsume(self.data, t.id, nil)
+        end
+    elseif t.kind == "p_undo" then
+        track("kuchnia", "used_undo")
+        res, err = self.plugin:act("consume_undo", nil, { undo_id = t.undo_id, label = t.name })
+        if res or err == "HTTP 404" then
+            self.data = Kitchen.markUsed(self.data, t.undo_id, nil)
+        elseif err == "HTTP 409" then
+            self.data = Kitchen.markUsed(self.data, t.undo_id, { undoable = false })
+        end
+    elseif t.kind == "p_shop" then
+        track("kuchnia", "shop")
+        res, err = self.plugin:act("shop_add", nil, { undo_id = t.undo_id, name = t.name, label = t.name })
+        local s = res and res.shopping
+        if type(s) == "table" then
+            local name = Kitchen.str(s.name) ~= "" and lowerKey(s.name) or t.name
+            self.data = Kitchen.markUsed(self.data, t.undo_id, { on_list = true })
+            if s.inserted == true then
+                self.data = Kitchen.shopDelta(self.data, name, 1)
+                self.shop_last = { name = name, shopping_id = s.shopping_id, undo_id = t.undo_id, at = os.time() }
+                UIManager:scheduleIn(UNDO_S + 1, self.undo_cb)
+            else
+                msg = name .. _(" już jest na ZAKUPACH.")
+            end
+        end
+    elseif t.kind == "p_shop_undo" then
+        track("kuchnia", "shop_undo")
+        res, err = self.plugin:act("shop_undo", nil, { shopping_id = last.shopping_id, label = last.name })
+        if res then
+            self.data = Kitchen.markUsed(self.data, last.undo_id, { on_list = false })
+            self.data = Kitchen.shopDelta(self.data, last.name, -1)
+            self.shop_last = { name = last.name, at = os.time(), undone = true }
+            UIManager:scheduleIn(UNDO_S + 1, self.undo_cb)
+        elseif err == "HTTP 404" or err == "HTTP 409" then
+            self.shop_last = nil -- nothing of ours left to take back
+        end
+    end
+    if not res then msg = Kitchen.pantryError(t.kind, err) end
+    if msg then UIManager:show(InfoMessage:new { text = msg }) end
+    self:redraw()
+    if res or err == "HTTP 404" or err == "HTTP 409" then UIManager:nextTick(self.refresh_cb) end
+    self.acted_at = os.time()
+    self.busy = false
+end
+
+-- ---- E5 Co zeszło: after UGOTOWANE ›, only what the recipe took
+
+--- One row per pantry item the recipe used. A row the recipe takes whole
+--- comes first and starts on ZUŻYTE (Q59); the rest start on ZOSTAŁO.
+function Kitchen.usedRows(cook, st)
+    st.pick = st.pick or {}
+    st.done_ids = st.done_ids or {}
+    local whole, part, seen = {}, {}, {}
+    for _i, ing in ipairs(type(cook.ingredients) == "table" and cook.ingredients or {}) do
+        local id = tonumber(ing.item_id)
+        if ing.have == true and id and not seen[id] and not st.done_ids[id] then
+            seen[id] = true
+            local qty, have = tonumber(ing.qty) or -1, tonumber(ing.item_qty) or -1
+            local unit = Kitchen.str(ing.item_unit)
+            local same = qty > 0 and have > 0 and lowerKey(Kitchen.str(ing.unit)) == lowerKey(unit)
+            local all = same and qty >= have
+            local r = { id = id, name = lowerKey(Kitchen.str(ing.item_name) ~= "" and ing.item_name or Kitchen.str(ing.name)),
+                was = Kitchen.str(ing.item_amount) ~= "" and ing.item_amount or Kitchen.str(ing.amount),
+                all = all, take = (same and not all) and qty or nil, have = have, unit = unit }
+            local into = all and whole or part
+            into[#into + 1] = r
+        end
+    end
+    for _i, r in ipairs(part) do whole[#whole + 1] = r end
+    return whole
+end
+
+function Kitchen.usedPick(st, r)
+    local p = st.pick[r.id]
+    if p == nil then return r.all end
+    return p
+end
+
+--- "było: 1 puszka" / "zostaną 2 szt." / "bez zmian · jest: 0,5 l".
+function Kitchen.usedNote(r, used)
+    if used then return _("było: ") .. r.was end
+    if r.take then
+        local left = r.have - r.take
+        local verb = (left == math.floor(left)) and plural(left, _("zostanie"), _("zostaną"), _("zostanie")) or _("zostanie")
+        return verb .. " " .. Kitchen.num(left) .. (r.unit ~= "" and (" " .. r.unit) or "")
+    end
+    return _("bez zmian · jest: ") .. r.was
+end
+
+function View:usedRow(x0, y, w, h, r, used)
+    local pad, gap, bh = px(12), px(8), px(48)
+    local l1, l2 = _("ZOSTAŁO"), _("ZUŻYTE")
+    local w1, w2 = Kitchen.btnW(l1, 12, px(76)), Kitchen.btnW(l2, 12, px(76))
+    local text_w = w - 2 * pad - gap - w1 - w2
+    local text = VerticalGroup:new { align = "left",
+        ktext(r.name, 14, used, text_w), ktext(Kitchen.usedNote(r, used), 12, false, text_w) }
+    local bx = x0 + pad + text_w + gap
+    self:claim(bx - math.floor(gap / 2), y, bx + w1, y + h, { kind = "u_pick", id = r.id, used = false })
+    self:claim(bx + w1, y, x0 + w, y + h, { kind = "u_pick", id = r.id, used = true })
+    return VerticalGroup:new { align = "left",
+        cell(w, h - px(1), HorizontalGroup:new { align = "center",
+            cell(text_w, h - px(1), text, 0), HorizontalSpan:new { width = gap },
+            button(w1, bh, l1, 12, not used), button(w2, bh, l2, 12, used),
+        }, pad),
+        hline(w) }
+end
+
+--- nil when there is nothing to ask: no recipe, already saved, nothing from
+--- the pantry in it — then Spiżarnia shows as usual.
+function View:buildUsed(x0, w, H)
+    if not self.pantry_used then return nil end
+    local c = (self.data or {}).cook
+    local st = type(c) == "table" and Kitchen.cookState(c)
+    local rows = (st and not st.saved) and Kitchen.usedRows(c, st) or {}
+    if #rows == 0 then
+        self.pantry_used = nil
+        return nil
+    end
+    local pad = px(14)
+    -- header: the question, the recipe, X = back to Gotuj with nothing saved
+    local xw = px(48)
+    local tw = w - 2 * pad - xw - px(10)
+    local head = VerticalGroup:new { align = "left",
+        ktext(_("Ugotowane. Co zeszło?"), 28, true, tw),
+        ktext(Kitchen.str(c.title) .. _(" · popraw tylko to, co się nie zgadza"), 14, false, tw) }
+    local hh = math.max(zpx(70), head:getSize().h + px(8))
+    local xbtn = FrameContainer:new {
+        background = Blitbuffer.COLOR_WHITE, bordersize = px(3), radius = px(8), padding = 0, margin = 0,
+        width = xw, height = xw, cell(xw - 2 * px(3), xw - 2 * px(3), icon("k_x", px(22)), 0, true) }
+    self:claim(x0 + w - pad - xw - px(10), 0, x0 + w, hh, { kind = "u_close" })
+    local header = HorizontalGroup:new { align = "center", cell(w - xw - pad, hh, head, pad), xbtn }
+    -- footer: what goes, then NIE TERAZ | ZAPISZ + N NA ZAKUPY | ZAPISZ
+    local names = {}
+    for _i, r in ipairs(rows) do if Kitchen.usedPick(st, r) then names[#names + 1] = r.name end end
+    local n = #names
+    local summary = n > 0 and (n .. " " .. plural(n, _("zużyty"), _("zużyte"), _("zużytych")) .. ": " .. table.concat(names, ", "))
+        or _("Nic nie zeszło do końca.")
+    local sum_h = math.max(zpx(20), ktext(summary, 14, false):getSize().h)
+    local bh = px(58)
+    local foot_h = px(3) + px(10) + sum_h + px(8) + bh + px(12)
+    -- the rows, top to bottom, left column first
+    local area = H - hh - px(3) - foot_h
+    local row_h = math.max(zpx(68), px(56))
+    local fit = math.max(1, math.floor(area / row_h))
+    local pages = math.ceil(#rows / (2 * fit))
+    st.used_page = math.min(math.max(1, st.used_page or 1), pages)
+    local first = (st.used_page - 1) * 2 * fit
+    local lw = math.floor((w - px(3)) / 2)
+    local rw = w - px(3) - lw
+    local y0 = hh + px(3)
+    local cols = {}
+    for k = 0, 1 do
+        local cx, cw = x0 + k * (lw + px(3)), k == 0 and lw or rw
+        local g = VerticalGroup:new { align = "left" }
+        for i = 1, fit do
+            local r = rows[first + k * fit + i]
+            if r then table.insert(g, self:usedRow(cx, y0 + (i - 1) * row_h, cw, row_h, r, Kitchen.usedPick(st, r))) end
+        end
+        cols[k + 1] = FrameContainer:new { bordersize = 0, padding = 0, margin = 0, width = cw, height = area, g }
+    end
+    local iw = w - 2 * pad
+    local pager = pages > 1 and string.format(_("%d z %d ›"), st.used_page, pages) or ""
+    local pager_w = pager ~= "" and (ktext(pager, 14, true):getSize().w + px(12)) or 0
+    local sum_row = HorizontalGroup:new { align = "center", cell(iw - pager_w, sum_h, ktext(summary, 14, false, iw - pager_w), 0) }
+    local fy = y0 + area
+    if pages > 1 then
+        table.insert(sum_row, cell(pager_w, sum_h, ktext(pager, 14, true), px(12)))
+        self:claim(x0 + pad + iw - pager_w, fy, x0 + w, fy + px(3) + px(10) + sum_h + px(4),
+            { kind = "u_page", to = st.used_page % pages + 1 })
+    end
+    local later = _("NIE TERAZ")
+    local later_w = Kitchen.btnW(later, 14, px(116))
+    local gap = px(8)
+    local rest = iw - later_w - gap
+    local btns = HorizontalGroup:new { align = "center", button(later_w, bh, later, 14, false), HorizontalSpan:new { width = gap } }
+    local by = fy + px(3) + px(10) + sum_h + px(8)
+    local bx = x0 + pad
+    self:claim(x0, by - px(4), bx + later_w + math.floor(gap / 2), y0 + area + foot_h, { kind = "u_later" })
+    bx = bx + later_w + gap
+    local save_w = rest
+    if n > 0 then
+        local shop = string.format(_("ZAPISZ + %d NA ZAKUPY"), n)
+        local shop_w = math.max(Kitchen.btnW(shop, 14, 0), math.floor((rest - gap) * 14 / 36))
+        save_w = rest - gap - shop_w
+        table.insert(btns, button(shop_w, bh, shop, 14, false))
+        table.insert(btns, HorizontalSpan:new { width = gap })
+        self:claim(bx - math.floor(gap / 2), by - px(4), bx + shop_w + math.floor(gap / 2), y0 + area + foot_h,
+            { kind = "u_save", shop = true })
+        bx = bx + shop_w + gap
+    end
+    table.insert(btns, button(save_w, bh, _("ZAPISZ"), 22, true))
+    self:claim(bx - math.floor(gap / 2), by - px(4), x0 + w, y0 + area + foot_h, { kind = "u_save" })
+    return VerticalGroup:new { align = "left",
+        header, hline(w, 3),
+        HorizontalGroup:new { align = "top", cols[1], vline(area), cols[2] },
+        hline(w, 3), VerticalSpan:new { width = px(10) },
+        cell(w, sum_h, sum_row, pad), VerticalSpan:new { width = px(8) },
+        cell(w, bh, btns, pad), VerticalSpan:new { width = px(12) },
+    }
+end
+
+--- ZAPISZ: one consume per row that changed, then (with + N NA ZAKUPY) the
+--- used-up ones onto the list. A row written once is never written again,
+--- so ZAPISZ after a dropped connection finishes the job without doubling it.
+function View:usedSave(shop)
+    local c = (self.data or {}).cook
+    if self.busy or type(c) ~= "table" then return end
+    self.busy = true
+    local st = Kitchen.cookState(c)
+    local failed, shop_failed, wrote = false, false, false
+    track("kuchnia", "used_save", shop and "shop" or nil)
+    for _i, r in ipairs(Kitchen.usedRows(c, st)) do
+        local used = Kitchen.usedPick(st, r)
+        if used or r.take then
+            local res, err = self.plugin:act("consume", r.id, { label = r.name, amount = (not used) and r.take or nil })
+            if not res and err ~= "HTTP 404" then
+                failed = true
+                break
+            end
+            st.done_ids[r.id] = true
+            wrote = true
+            local cons = res and type(res.consumed) == "table" and res.consumed
+            if cons then
+                self.data = Kitchen.afterConsume(self.data, r.id, cons)
+            elseif err == "HTTP 404" then
+                self.data = Kitchen.afterConsume(self.data, r.id, nil)
+            end
+            if shop and used and cons and cons.finished then
+                local s = self.plugin:act("shop_add", nil, { undo_id = cons.undo_id, name = r.name, label = r.name })
+                if type(s) == "table" and type(s.shopping) == "table" then
+                    self.data = Kitchen.markUsed(self.data, cons.undo_id, { on_list = true })
+                    if s.shopping.inserted == true then self.data = Kitchen.shopDelta(self.data, r.name, 1) end
+                else
+                    shop_failed = true -- the row keeps its + ZAKUPY in Spiżarnia
+                end
+            end
+        end
+    end
+    if failed then
+        UIManager:show(InfoMessage:new { text = _("Nie zapisano wszystkiego — brak połączenia. ZAPISZ jeszcze raz dokończy.") })
+    else
+        st.saved = true
+        self.pantry_used, self.place, self.pantry_page = nil, nil, 1
+        if shop_failed then
+            UIManager:show(InfoMessage:new { text = _("Nie wszystko trafiło na ZAKUPY. Dopisz w Spiżarni: + ZAKUPY.") })
+        end
+    end
+    self:redraw()
+    if wrote then UIManager:nextTick(self.refresh_cb) end
+    self.acted_at = os.time()
+    self.busy = false
+end
+
+--- Taps of Spiżarnia and Co zeszło; true when the tap was one of them.
+function View:pantryTap(t)
+    local k = t.kind
+    local st = Kitchen.cook_state
+    local p = type((self.data or {}).pantry) == "table" and self.data.pantry or {}
+    if k == "place" then
+        if t.place == self.place then return true end
+        self.place, self.pantry_page = t.place, 1
+    elseif k == "p_page" then
+        self.pantry_page = t.to
+    elseif k == "p_use" or k == "p_undo" or k == "p_shop" or k == "p_shop_undo" then
+        self:pantryAct(t)
+        return true
+    elseif k == "shopping" then
+        local items = {}
+        for _i, s in ipairs(type(p.shopping) == "table" and p.shopping or {}) do
+            items[#items + 1] = { text = Kitchen.str(s), inert = true }
+        end
+        if #items == 0 then items[1] = { text = _("Lista jest pusta."), inert = true } end
+        self.plugin:showList(_("ZAKUPY"), items)
+        return true
+    elseif k == "used_list" then
+        local items = {}
+        for _i, u in ipairs(type(p.consumed) == "table" and p.consumed or {}) do
+            local text = Kitchen.str(u.at) .. "  " .. lowerKey(Kitchen.str(u.name))
+            if u.partial then text = text .. _(" · było ") .. Kitchen.str(u.amount) end
+            items[#items + 1] = { text = text, inert = true }
+        end
+        self.plugin:showList(_("ZUŻYTE DZIŚ"), items)
+        return true
+    elseif k == "u_pick" and st and st.pick then
+        st.pick[t.id] = t.used
+    elseif k == "u_page" and st then
+        st.used_page = t.to
+    elseif k == "u_later" then
+        self.screen, self.pantry_used = "tasks", nil
+    elseif k == "u_close" then
+        self.screen, self.pantry_used = "cook", nil
+    elseif k == "u_save" then
+        self:usedSave(t.shop)
+        return true
+    else
+        return false
+    end
+    self:redraw()
+    return true
+end
+
+-- ---- E4 Plan posiłków (Tasksss 1250): today on the left, the other days on
+-- the right, ‹ › for other weeks (online only). No clock (Q54): "OBIAD · 35 min".
+
+Kitchen.DAY_SHORT = { ["PONIEDZIAŁEK"] = "pon", ["WTOREK"] = "wt", ["ŚRODA"] = "śr", ["CZWARTEK"] = "czw",
+    ["PIĄTEK"] = "pt", ["SOBOTA"] = "sob", ["NIEDZIELA"] = "nd" }
+
+--- "2026-11-14" ± n days. Noon, so a DST night never skips or repeats a date.
+function Kitchen.addDays(iso, n)
+    local y, m, d = Kitchen.str(iso):match("^(%d%d%d%d)-(%d%d)-(%d%d)$")
+    if not y then return nil end
+    return os.date("%Y-%m-%d", os.time { year = tonumber(y), month = tonumber(m), day = tonumber(d) + n, hour = 12 })
+end
+
+--- The meal a day is about: obiad, else the first with a recipe, else the first.
+function Kitchen.mainMeal(day)
+    local meals = type(day.meals) == "table" and day.meals or {}
+    local first
+    for _i, m in ipairs(meals) do
+        if m.meal == "obiad" then return m end
+        if not first and m.recipe_id then first = m end
+    end
+    return first or meals[1]
+end
+
+--- "OBIAD · 35 min"
+function Kitchen.mealHead(m)
+    local s = ReadingOS.plUpper(Kitchen.str(m.label))
+    if (tonumber(m.minutes) or 0) > 0 then s = s .. " · " .. tostring(m.minutes) .. " min" end
+    return s
+end
+
+--- The week on screen: one fetched with ‹ ›, else the payload's own.
+function View:plan()
+    local p = self.week or (self.data or {}).plan
+    if type(p) ~= "table" or type(p.days) ~= "table" or #p.days == 0 then return nil end
+    return p
+end
+
+--- The day on the left: the tapped one, else today, else the week's first
+--- (a refresh past midnight or another week drops a tapped date).
+function View:planDay(p)
+    local today
+    for _i, day in ipairs(p.days) do
+        if self.plan_day and day.date == self.plan_day then return day end
+        if day.today == true then today = day end
+    end
+    return today or p.days[1]
+end
+
+--- "Plan posiłków  13–19 listopada · stan na 14:30"   ‹  ›  ⟳
+function View:planHeader(x0, y0, w, p)
+    local h, pad, gap, bw = px(54), px(14), px(8), px(46)
+    local status = Kitchen.status(self, self.week and self.week_at or nil) .. " ›"
+    if Kitchen.str(p.range) ~= "" then status = p.range .. " · " .. status end
+    local left_w = w - pad - 3 * bw - 2 * gap - pad
+    local title = ktext(_("Plan posiłków"), 22, true, left_w - pad)
+    local left = HorizontalGroup:new { align = "center", title, HorizontalSpan:new { width = px(12) },
+        ktext(status, 14, false, math.max(1, left_w - pad - title:getSize().w - px(12))) }
+    local bx, half = x0 + left_w, math.floor(gap / 2)
+    self:claim(x0, y0, bx, y0 + h, { kind = "settings" })
+    self:claim(bx, y0, bx + bw + half, y0 + h, { kind = "p_week", delta = -7 })
+    self:claim(bx + bw + half, y0, bx + 2 * bw + gap + half, y0 + h, { kind = "p_week", delta = 7 })
+    self:claim(bx + 2 * bw + gap + half, y0, x0 + w, y0 + h, { kind = "refresh" })
+    return HorizontalGroup:new { align = "center",
+        cell(left_w, h, left, pad),
+        button(bw, px(44), "‹", 18, false), HorizontalSpan:new { width = gap },
+        button(bw, px(44), "›", 18, false), HorizontalSpan:new { width = gap },
+        Kitchen.refreshBtn(),
+    }, h
+end
+
+--- The black card: "OBIAD · 35 min", the title, what is missing, GOTUJ ›
+--- (today's own recipe only — Q74: another day shows, it does not cook).
+function View:planCard(x0, y0, w, day, m)
+    local d = self.data or {}
+    local margin, pad = px(10), px(12)
+    local iw = w - 2 * (margin + pad)
+    local meta
+    local cook = type(d.cook) == "table" and d.cook or nil
+    local here = day.today == true and cook and m.recipe_id and m.recipe_id == cook.id and not self.week
+    if here then
+        local missing = {}
+        for _i, ing in ipairs(type(cook.ingredients) == "table" and cook.ingredients or {}) do
+            if ing.have == false then missing[#missing + 1] = lowerKey(Kitchen.str(ing.name)) end
+        end
+        meta = #missing > 0 and (_("brak: ") .. table.concat(missing, ", ")) or _("wszystko w spiżarni")
+    elseif m.recipe_id then
+        local n = tonumber(m.missing) or 0
+        meta = n > 0 and (_("brak ") .. n) or _("wszystko w spiżarni")
+    end
+    local g = VerticalGroup:new { align = "left",
+        ktext(Kitchen.mealHead(m), 12, true, iw, true),
+        ktext(Kitchen.str(m.text), 22, true, iw, true) }
+    if meta then table.insert(g, ktext(meta, 14, false, iw, true)) end
+    if here then
+        local top = g:getSize().h
+        table.insert(g, VerticalSpan:new { width = px(10) })
+        table.insert(g, button(iw, px(50), _("GOTUJ ›"), 14, false))
+        local by = y0 + margin + pad + top + px(10)
+        self:claim(x0, y0, x0 + w, by + px(50) + pad + margin, { kind = "cook" })
+    end
+    return FrameContainer:new {
+        background = Blitbuffer.COLOR_BLACK, bordersize = 0, radius = px(8), padding = pad, margin = margin,
+        width = w, g,
+    }
+end
+
+--- One meal line: "KOLACJA · 20 min" over what it is, struck once it is over.
+function Kitchen.planRow(m, w, h)
+    local tw = w - 2 * px(14)
+    local text = ktext(Kitchen.str(m.text), 14, false, tw)
+    if m.over == true then text = Kitchen.strike(text) end
+    return VerticalGroup:new { align = "left",
+        cell(w, h - px(1), VerticalGroup:new { align = "left", ktext(Kitchen.mealHead(m), 12, true, tw), text }, px(14)),
+        hline(w) }
+end
+
+--- DZIŚ · PIĄTEK 13 (or "‹ DZIŚ · NIEDZIELA 15"), the meals, the notes.
+function View:planLeft(x0, y0, w, h, day)
+    local TextBoxWidget = require("ui/widget/textboxwidget")
+    local label = Kitchen.str(day.day) .. " " .. Kitchen.str(day.num)
+    local g = VerticalGroup:new { align = "left" }
+    if day.today == true then
+        table.insert(g, band(w, _("DZIŚ · ") .. label))
+    else
+        table.insert(g, band(w, _("‹ DZIŚ  ·  ") .. label))
+        self:claim(x0, y0, x0 + w, y0 + zpx(24), { kind = "plan_today" })
+    end
+    local y, bottom = y0 + zpx(24), y0 + h
+    local meals = type(day.meals) == "table" and day.meals or {}
+    local main = Kitchen.mainMeal(day)
+    local row_h = zpx(50)
+    local more_h = ktext("x", 12, true):getSize().h + px(8)
+    local left_out, notes = {}, {}
+    for i, m in ipairs(meals) do
+        local n_hit = #self.hit
+        local item = m == main and self:planCard(x0, y, w, day, m) or Kitchen.planRow(m, w, row_h)
+        local ih = m == main and item:getSize().h or row_h
+        local room = bottom - y - (i < #meals and more_h or 0)
+        if #left_out == 0 and ih <= room then
+            table.insert(g, item)
+            y = y + ih
+        else
+            for j = #self.hit, n_hit + 1, -1 do self.hit[j] = nil end -- a card left out leaves no GOTUJ behind
+            left_out[#left_out + 1] = lowerKey(Kitchen.str(m.label))
+        end
+        if Kitchen.str(m.note) ~= "" then notes[#notes + 1] = lowerKey(Kitchen.str(m.label)) .. ": " .. m.note end
+    end
+    if #meals == 0 then
+        table.insert(g, cell(w, row_h, ktext(_("Nic w planie."), 14, false, w - 2 * px(14)), px(14)))
+        y = y + row_h
+    end
+    local tw = w - 2 * px(14)
+    if #left_out > 0 then
+        table.insert(g, cell(w, more_h, ktext(_("też: ") .. table.concat(left_out, ", "), 12, true, tw), px(14)))
+    elseif #notes > 0 then
+        local room = bottom - y - px(16)
+        local text = table.concat(notes, "\n")
+        local box = TextBoxWidget:new { text = text, face = kface(14), width = tw }
+        if box:getSize().h > room then
+            box = room >= ktext("x", 14):getSize().h and TextBoxWidget:new { text = text, face = kface(14), width = tw,
+                height = room, height_adjust = true, height_overflow_show_ellipsis = true } or nil
+        end
+        if box then
+            table.insert(g, VerticalSpan:new { width = px(8) })
+            table.insert(g, cell(w, box:getSize().h, box, px(14)))
+        end
+    end
+    return FrameContainer:new { bordersize = 0, padding = 0, margin = 0, width = w, height = h, g }
+end
+
+--- NASTĘPNE DNI: "sob 14  Pierogi ruskie / kolacja: sałatka grecka · brak 2  ›".
+function View:planRight(x0, y0, w, h, p, shown)
+    local rows = {}
+    for _i, day in ipairs(p.days) do
+        if day ~= shown then rows[#rows + 1] = day end
+    end
+    local row_h = zpx(58)
+    local dw = ktext("czw 30", 14, true):getSize().w + px(10)
+    local tw = w - 2 * px(14) - dw - px(24)
+    local y = y0 + zpx(24)
+    local function dayRow(day)
+        local main = Kitchen.mainMeal(day)
+        local rest = {}
+        for _i, m in ipairs(type(day.meals) == "table" and day.meals or {}) do
+            if m ~= main then rest[#rest + 1] = lowerKey(Kitchen.str(m.label)) .. ": " .. Kitchen.str(m.text) end
+        end
+        local note = table.concat(rest, " · ")
+        if (tonumber(day.missing) or 0) > 0 then note = note ~= "" and (note .. _(" · brak ") .. day.missing) or (_("brak ") .. day.missing) end
+        local short = day.today == true and _("DZIŚ")
+            or ((Kitchen.DAY_SHORT[Kitchen.str(day.day)] or lowerKey(Kitchen.str(day.day))) .. " " .. Kitchen.str(day.num))
+        local text = VerticalGroup:new { align = "left",
+            main and ktext(Kitchen.str(main.text), 18, true, tw) or ktext(_("nic w planie"), 14, false, tw) }
+        if note ~= "" then table.insert(text, ktext(note, 12, false, tw)) end
+        self:claim(x0, y, x0 + w, y + row_h, { kind = "plan_day", date = day.date })
+        y = y + row_h
+        return VerticalGroup:new { align = "left",
+            cell(w, row_h - px(1), HorizontalGroup:new { align = "center",
+                cell(dw, row_h - px(1), ktext(short, 14, true, dw), 0),
+                cell(tw, row_h - px(1), text, 0),
+                cell(px(24), row_h - px(1), ktext("›", 18, true), 0, true),
+            }, px(14)),
+            hline(w) }
+    end
+    local list = self:column(x0, y, w, rows, row_h, h - zpx(24), "plan_page", dayRow)
+    return FrameContainer:new { bordersize = 0, padding = 0, margin = 0, width = w, height = h,
+        VerticalGroup:new { align = "left", band(w, shown.today == true and _("NASTĘPNE DNI") or _("INNE DNI")), list } }
+end
+
+--- BRAKUJE NA TEN TYDZIEŃ · 3                                   ZAKUPY ›
+function View:planFooter(x0, y0, w, h, p)
+    local n = tonumber(p.missing_week) or 0
+    local last = p.days[#p.days] or {}
+    local left = ""
+    if n > 0 then
+        left = _("BRAKUJE NA TEN TYDZIEŃ · ") .. n
+    elseif Kitchen.str(last.date) >= os.date("%Y-%m-%d") then
+        left = _("NA TEN TYDZIEŃ JEST WSZYSTKO")
+    end
+    local right = _("ZAKUPY ›")
+    local right_w = ktext(right, 14, true):getSize().w
+    self:claim(x0, y0, x0 + w, y0 + h, { kind = "shopping" })
+    return HorizontalGroup:new { align = "center",
+        cell(w - right_w - px(14), h, ktext(left, 14, true, w - right_w - 3 * px(14)), px(14)),
+        ktext(right, 14, true) }
+end
+
+function View:buildPlan(x0, w, H)
+    local strip, sh = self:nowStrip(x0, 0, w)
+    local p = self:plan()
+    local header, hh = self:planHeader(x0, sh, w, p or {})
+    if not p then
+        return VerticalGroup:new { align = "left", strip, header, hline(w, 3),
+            cell(w, H - sh - hh - px(3), ktext(_("Brak planu posiłków."), 18, true, w - 2 * px(14)), 0, true) }
+    end
+    local day = self:planDay(p)
+    local foot_h = zpx(46)
+    local top = sh + hh
+    local ch = H - top - 2 * px(3) - foot_h
+    local y0 = top + px(3)
+    local lw = math.floor((w - px(3)) * 44 / 100) -- 296 of 724 drawn, the rail aside
+    local rw = w - px(3) - lw
+    return VerticalGroup:new { align = "left", strip, header, hline(w, 3),
+        HorizontalGroup:new { align = "top",
+            self:planLeft(x0, y0, lw, ch, day),
+            vline(ch),
+            self:planRight(x0 + lw + px(3), y0, rw, ch, p, day) },
+        hline(w, 3),
+        self:planFooter(x0, y0 + ch + px(3), w, foot_h, p) }
+end
+
+--- ‹ › : the default week needs no fetch; any other is online only, and the
+--- server's own clamp (8 weeks either way, else today) means "no further".
+function View:planWeek(delta)
+    local p = self:plan()
+    local to = p and Kitchen.addDays(p.from, delta)
+    if not to then return true end
+    local base = (self.data or {}).plan
+    if type(base) == "table" and base.from == to then
+        self.week, self.week_at = nil, nil
+    else
+        local data = Kitchen.fetch(to)
+        local wk = type(data) == "table" and data.plan
+        if type(wk) ~= "table" or type(wk.days) ~= "table" then
+            UIManager:show(InfoMessage:new { text = _("Inne tygodnie tylko z siecią."), timeout = 3 })
+            return true
+        end
+        if wk.from ~= to then
+            UIManager:show(InfoMessage:new { text = _("Dalej plan nie sięga: 8 tygodni w przód i wstecz."), timeout = 3 })
+            return true
+        end
+        self.week, self.week_at = wk, os.time()
+    end
+    track("kuchnia", "week", to)
+    self.plan_day, self.plan_page = nil, 1
+    self:redraw()
+    return true
+end
+
+function View:planTap(t)
+    local k = t.kind
+    if k == "p_week" then return self:planWeek(t.delta) end
+    if k == "plan_day" then
+        self.plan_day = t.date
+    elseif k == "plan_today" then
+        self.plan_day, self.plan_page, self.week, self.week_at = nil, 1, nil, nil
+    else
+        return false
+    end
+    self:redraw()
+    return true
+end
+
+-- ---- D1 Odświeżanie (Q78–Q80): landscape, two columns beside the rail.
+-- Left: state, ODŚWIEŻ TERAZ, SAMO SIĘ ODŚWIEŻA, CO ILE, light in quiet.
+-- Right: up to three quiet windows, each on two lines (days ›  ✕ / − od + do − do +).
+
+--- A WŁ | WYŁ pair (or any row of choices) across `w`; the picked one black.
+function View:choices(x0, y0, w, h, items, pick, mk)
+    local gap = px(6)
+    local bw = math.floor((w - (#items - 1) * gap) / #items)
+    local row = HorizontalGroup:new { align = "center" }
+    local x = x0
+    for i, it in ipairs(items) do
+        if i > 1 then table.insert(row, HorizontalSpan:new { width = gap }) end
+        table.insert(row, button(bw, h - px(8), it.label, 14, it.value == pick))
+        self:claim(x, y0, x + bw, y0 + h, mk(it.value))
+        x = x + bw + gap
+    end
+    return cell(w, h, row, 0)
+end
+
+function View:buildSettings(x0, w, H)
+    local cfg = Kitchen.cfg()
+    local pad = px(14)
+    local lw = px(280)
+    local rw = w - px(3) - lw
+    local iw = lw - 2 * pad
+
+    -- left column
+    local left = VerticalGroup:new { align = "left" }
+    local hh = px(56)
+    local xw = px(48)
+    table.insert(left, VerticalGroup:new { align = "left",
+        HorizontalGroup:new { align = "center",
+            cell(lw - xw - pad, hh - px(3), ktext(_("Odświeżanie"), 22, true, lw - xw - 2 * pad), pad),
+            FrameContainer:new { bordersize = px(3), radius = px(8), padding = 0, margin = 0, width = xw, height = xw,
+                cell(xw - 2 * px(3), xw - 2 * px(3), icon("k_x", px(20)), 0, true) },
+        },
+        hline(lw, 3) })
+    self:claim(x0 + lw - xw - pad, 0, x0 + lw, hh, { kind = "s_close" })
+    local y = hh
+    local shown = self.offline and self.saved_at or (not self.offline and self.fetched_at) or nil
+    local line2 = Kitchen.status(self):gsub("^[^·]*· ?", "")
+    if cfg.auto and line2:find(_("następne"), 1, true) == 1 then
+        line2 = string.format(_("co %d min · "), cfg.every) .. line2
+    end
+    local sh = zpx(60)
+    table.insert(left, cell(lw, sh, VerticalGroup:new { align = "left",
+        ktext(_("Stan na ") .. (shown and Kitchen.clock(shown) or "?"), 22, true, iw),
+        ktext(line2, 12, false, iw) }, pad))
+    y = y + sh
+    local rh = zpx(64)
+    table.insert(left, cell(lw, rh, FrameContainer:new {
+        background = Blitbuffer.COLOR_BLACK, bordersize = 0, radius = px(8), padding = 0, margin = 0,
+        width = iw, height = rh - px(10),
+        cell(iw, rh - px(10), ktext(_("ODŚWIEŻ TERAZ"), 18, true, iw - px(16), true), 0, true) }, pad))
+    self:claim(x0, y, x0 + lw, y + rh, { kind = "refresh" })
+    y = y + rh
+    local bh, ch = zpx(24), zpx(56)
+    local function onoff(label, pick, kind)
+        table.insert(left, band(lw, label))
+        y = y + bh
+        table.insert(left, cell(lw, ch, self:choices(x0 + pad, y, iw, ch,
+            { { label = _("WŁ"), value = true }, { label = _("WYŁ"), value = false } }, pick,
+            function(v) return { kind = kind, on = v } end), pad))
+        y = y + ch
+    end
+    onoff(_("SAMO SIĘ ODŚWIEŻA"), cfg.auto, "s_auto")
+    table.insert(left, band(lw, _("CO ILE · MIN")))
+    y = y + bh
+    local every = {}
+    for _i, n in ipairs(Quiet.EVERY) do every[#every + 1] = { label = tostring(n), value = n } end
+    table.insert(left, cell(lw, ch, self:choices(x0 + pad, y, iw, ch, every, cfg.every,
+        function(v) return { kind = "s_every", n = v } end), pad))
+    y = y + ch
+    onoff(_("PODŚWIETLENIE W CISZY"), cfg.light_on, "s_light")
+
+    -- right column
+    local rx = x0 + lw + px(3)
+    local riw = rw - 2 * pad
+    local right = VerticalGroup:new { align = "left" }
+    table.insert(right, band(rw, _("CISZA · W TYCH GODZINACH NIE ODŚWIEŻA")))
+    local ry = bh
+    local lh = math.max(zpx(46), px(40)) -- 18 pt times have a floor too
+    local bth = lh - px(8)
+    for i, win in ipairs(cfg.windows) do
+        local days = (Quiet.DAY_LABEL[win.days] or "") .. " ›"
+        local dw = Kitchen.btnW(days, 12, px(110))
+        table.insert(right, cell(rw, lh, HorizontalGroup:new { align = "center",
+            button(dw, bth, days, 12, false),
+            HorizontalSpan:new { width = riw - dw - px(44) },
+            cell(px(44), bth, icon("k_x", px(18)), 0, true) }, pad))
+        self:claim(rx + pad, ry, rx + pad + dw, ry + lh, { kind = "s_days", i = i })
+        self:claim(rx + rw - pad - px(44), ry, rx + rw, ry + lh, { kind = "s_del", i = i })
+        ry = ry + lh
+        local tw = Kitchen.btnW("22:30", 18, px(64))
+        local sw = px(34)
+        local do_w = ktext(_("do"), 14, true):getSize().w + 2 * px(8)
+        local row = HorizontalGroup:new { align = "center" }
+        local x = rx + pad
+        local function field(key, value)
+            local other = key == "from" and win.to or win.from
+            for _j, part in ipairs { { "−", -30 }, { "t" }, { "+", 30 } } do
+                if part[1] == "t" then
+                    table.insert(row, button(tw, bth, Quiet.hm(value), 18, true))
+                    x = x + tw
+                else
+                    table.insert(row, button(sw, bth, part[1], 18, false))
+                    if Quiet.step(value, part[2], other) ~= value then
+                        self:claim(x, ry, x + sw, ry + lh, { kind = "s_time", i = i, key = key, delta = part[2] })
+                    end
+                    x = x + sw
+                end
+            end
+        end
+        field("from", win.from)
+        table.insert(row, cell(do_w, bth, ktext(_("do"), 14, true), 0, true))
+        x = x + do_w
+        field("to", win.to)
+        table.insert(right, VerticalGroup:new { align = "left", cell(rw, lh - px(1), row, pad), hline(rw) })
+        ry = ry + lh
+    end
+    if #cfg.windows == 0 then
+        table.insert(right, cell(rw, 2 * lh, ktext(_("Brak — odświeża też w nocy."), 14, false, riw), pad))
+        ry = ry + 2 * lh
+    end
+    local add_h = zpx(56)
+    local full = #cfg.windows >= Quiet.MAX
+    local add = _("+ DODAJ OKNO")
+    local aw = Kitchen.btnW(add, 14, 0)
+    local hint = full and _("najwyżej 3 okna") or _("krok 30 min · bez klawiatury")
+    table.insert(right, cell(rw, add_h, HorizontalGroup:new { align = "center",
+        full and FrameContainer:new { bordersize = px(3), radius = px(8), padding = 0, margin = 0,
+            width = aw, height = add_h - px(10), color = Blitbuffer.COLOR_GRAY_9,
+            cell(aw - 2 * px(3), add_h - px(10) - 2 * px(3), TextWidget:new { text = add, face = kface(14), bold = true,
+                fgcolor = Blitbuffer.COLOR_GRAY_9 }, 0, true) }
+            or button(aw, add_h - px(10), add, 14, false),
+        HorizontalSpan:new { width = px(12) },
+        ktext(hint, 12, false, math.max(1, riw - aw - px(12))) }, pad))
+    if not full then self:claim(rx + pad, ry, rx + pad + aw, ry + add_h, { kind = "s_add" }) end
+    ry = ry + add_h
+    local nh = math.max(zpx(22), px(20)) -- 12 pt text has a floor; the box keeps up
+    local lines = { _("ODŚWIEŻ TERAZ działa zawsze —"), _("także w ciszy i przy wyłączonym.") }
+    local _qs, qe = Quiet.span(cfg.windows, os.time())
+    local ends = qe or (function()
+        local st = Quiet.nextStart(cfg.windows, os.time())
+        local _s2, e2 = st and Quiet.span(cfg.windows, st)
+        return e2
+    end)()
+    if not cfg.auto then
+        lines[3] = _("WYŁ: ekran zmienia się tylko po ODŚWIEŻ TERAZ.")
+    elseif ends then
+        lines[3] = _("Po ciszy ekran odświeża się sam o ") .. Kitchen.clock(ends) .. "."
+    end
+    table.insert(right, VerticalSpan:new { width = H - ry - 3 * nh - px(10) })
+    for _i, l in ipairs(lines) do
+        table.insert(right, cell(rw, nh, TextWidget:new { text = l, face = kface(12), max_width = riw,
+            fgcolor = Blitbuffer.COLOR_GRAY_5 or Blitbuffer.COLOR_BLACK }, pad))
+    end
+
+    return HorizontalGroup:new { align = "top",
+        FrameContainer:new { bordersize = 0, padding = 0, margin = 0, width = lw, height = H, left },
+        vline(H),
+        FrameContainer:new { bordersize = 0, padding = 0, margin = 0, width = rw, height = H, right },
+    }
+end
+
+--- Saves one change to the refresh settings, then re-plans what comes next.
+function View:settingsSave(key, value)
+    set(key, value)
+    track("kuchnia", "settings", key)
+    self:schedule()
+    self:redraw()
+    return true
+end
+
+function View:settingsTap(t)
+    local k = t.kind
+    if k == "settings" then
+        if self.screen ~= "settings" then
+            self.prev_screen, self.screen = self.screen, "settings"
+            track("kuchnia", "screen", "settings")
+            self:redraw()
+        end
+        return true
+    end
+    if k == "s_close" then
+        self.screen, self.prev_screen = self.prev_screen or "tasks", nil
+        self:redraw()
+        return true
+    end
+    if k == "s_auto" then return self:settingsSave("readingos_kitchen_auto", t.on) end
+    if k == "s_every" then return self:settingsSave("readingos_kitchen_every", t.n) end
+    if k == "s_light" then return self:settingsSave("readingos_kitchen_quiet_light", t.on) end
+    if k ~= "s_days" and k ~= "s_time" and k ~= "s_del" and k ~= "s_add" then return false end
+    -- rule 5: a fresh copy of the list, edited, then handed to set()
+    local wins = Kitchen.cfg().windows
+    local w = wins[t.i]
+    if k == "s_add" then
+        if #wins >= Quiet.MAX then return true end
+        wins[#wins + 1] = { days = "wd", from = 9 * 60, to = 16 * 60 }
+    elseif not w then
+        return true
+    elseif k == "s_days" then
+        w.days = Quiet.nextDays(w.days)
+    elseif k == "s_del" then
+        table.remove(wins, t.i)
+    else
+        local other = t.key == "from" and w.to or w.from
+        w[t.key] = Quiet.step(w[t.key], t.delta, other)
+    end
+    return self:settingsSave("readingos_kitchen_quiet", wins)
+end
+
+function ReadingOS:openKitchen(dashboard)
+    local data, offline, saved_at = Kitchen.fetch()
+    if not data then
+        track("kuchnia", "open", "no data")
+        UIManager:show(InfoMessage:new { text = _("Brak danych kuchni. Połącz się z Wi-Fi i spróbuj jeszcze raz.") })
+        return
+    end
+    track("kuchnia", "open", offline and "offline" or nil)
+    UIManager:show(View:new { plugin = self, dashboard = dashboard, data = data, offline = offline,
+        saved_at = saved_at }, "full")
+end
+ReadingOS._Kitchen = Kitchen -- test_kitchen_layout.lua
+end -- kuchnia
 
 -- ------------------------------------------------------------------- learn
 --
@@ -5456,6 +8192,12 @@ end
 local open_teraz = nil
 local function closeOpenTeraz()
     if open_teraz then open_teraz:onClose() end
+    -- KUCHNIA holds the screen sideways the same way (its own saved mode).
+    -- Asleep, it must not light the panel under the sleep page (Q86).
+    if Kitchen.open then
+        Kitchen.open.sleeping = true
+        Kitchen.open:onClose()
+    end
 end
 
 --- One category column: JEDZENIE / SPRZĄTANIE / PRADA at the top, owner
