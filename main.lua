@@ -1431,7 +1431,7 @@ function Dashboard:build()
             self.light_text = text(label, dashFace(SIZE_META), { bold = true })
             self.light_icon = sun
             self.light_group = HorizontalGroup:new { align = "center",
-                icon(sun, Screen:scaleBySize(light > 0 and 12 or 16)),
+                icon(sun, Screen:scaleBySize(12)),
                 HorizontalSpan:new { width = light > 0 and Screen:scaleBySize(2) or 0 },
                 self.light_text,
             }
@@ -3125,7 +3125,7 @@ function ReadingOS:handle(dashboard, target, is_hold)
             dashboard.light_text:setText(label)
             local g = dashboard.light_group
             if sun ~= dashboard.light_icon then
-                g[1] = icon(sun, Screen:scaleBySize(level > 0 and 12 or 16))
+                g[1] = icon(sun, Screen:scaleBySize(12))
                 dashboard.light_icon = sun
             end
             g[2].width = level > 0 and Screen:scaleBySize(2) or 0
