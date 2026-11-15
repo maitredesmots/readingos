@@ -878,7 +878,8 @@ function icon(name, size)
         if svg then
             local file = iconFile(name, svg)
             if not (file and IconWidget) then return nil end
-            return IconWidget:new { file = file, width = size, height = size }
+            -- A white twin keeps its alpha: KOReader flattens other icons onto white (1252).
+            return IconWidget:new { file = file, width = size, height = size, alpha = name:match("_w$") and true or nil }
         end
         if not IconWidget then return nil end
         return IconWidget:new { icon = name, width = size, height = size }
@@ -4134,8 +4135,12 @@ local function button(w, h, label, n, on)
 end
 
 local function checkbox(n)
+    -- FrameContainer measures its content, not width/height (those only paint), so the
+    -- box gets content of its own size or it draws over the title (1252, PW3 photo).
+    local inner = px(n) - 2 * px(3)
     return FrameContainer:new { bordersize = px(3), radius = px(5), padding = 0, margin = 0,
-        width = px(n), height = px(n), HorizontalSpan:new { width = 0 } }
+        width = px(n), height = px(n),
+        CenterContainer:new { dimen = Geom:new { w = inner, h = inner }, HorizontalSpan:new { width = 0 } } }
 end
 
 local function plural(n, one, few, many)
@@ -5170,8 +5175,10 @@ function View:ingRow(ing, w, h, in_pot)
     local pad, mark_w, gap = px(14), px(24), px(10)
     local mark
     if not ing.have then
+        local inner = mark_w - 2 * px(3) -- sized content, see checkbox() (1252)
         mark = FrameContainer:new { bordersize = px(3), radius = px(12), padding = 0, margin = 0,
-            width = mark_w, height = mark_w, HorizontalSpan:new { width = 0 } }
+            width = mark_w, height = mark_w,
+            CenterContainer:new { dimen = Geom:new { w = inner, h = inner }, HorizontalSpan:new { width = 0 } } }
     elseif in_pot then
         mark = FrameContainer:new { background = Blitbuffer.COLOR_BLACK, bordersize = 0, radius = px(5),
             padding = 0, margin = 0, width = mark_w, height = mark_w,
