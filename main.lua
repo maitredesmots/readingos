@@ -8822,6 +8822,11 @@ function ReadingOS:patchScreensaver()
     Screensaver._orig_show_before_readingos = Screensaver.show
 
     Screensaver.show = function(ss)
+        -- TERAZ and KUCHNIA first, before ANY sleep page — ours, the cover
+        -- fallback below, or another sleep type: they hold the screen sideways,
+        -- and KOReader's own page would save "sideways" as the mode to wake
+        -- into (PW3 2026-11-15: dashboard drawn sideways on wake).
+        closeOpenTeraz()
         if G_reader_settings:readSetting("screensaver_type") ~= SS_TYPE then
             return Screensaver._orig_show_before_readingos(ss)
         end
@@ -8835,11 +8840,6 @@ function ReadingOS:patchScreensaver()
         Device.screen_saver_mode = true
 
         local function draw()
-            -- TERAZ and KUCHNIA first, before ANY sleep page — ours or the
-            -- cover fallback below: they hold the screen sideways, and
-            -- KOReader's cover page would save "sideways" as the mode to
-            -- wake into (PW3 2026-11-15: dashboard drawn sideways on wake).
-            closeOpenTeraz()
             local data, is_stale = plugin:ssFetch()
             if not data then
                 -- Nothing to say is not a reason to leave a half-drawn page:
