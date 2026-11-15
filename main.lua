@@ -74,7 +74,6 @@ local DEFAULTS = {
     readingos_ss_landscape = true,   -- three categories side by side need the width
     readingos_device_id = "",        -- generated once on first "Telefon" open, never regenerated
     readingos_presence_seconds = 0,  -- Phone Companion heartbeat while awake + on Wi-Fi (60); 0 = off
-    readingos_craft_font = 0,        -- CraftView instruction size, -2..+2 steps around the default
     readingos_craft_awake = 0,       -- last "nie gaś ekranu" choice in minutes, re-applied on open
     -- 2.13 (leo, 2026-10-20): every extra that costs a request, a file write
     -- or a layout pass is OFF until switched on in USTAWIENIA.
@@ -3550,13 +3549,13 @@ end
 
 --- Every row of the current tab (or of the open recipe) as { widget,
 --- target?, sticky? }. `sticky` keeps a header on the page of its first row.
--- ---- type: three reading distances, each with its own A−/A+
+-- ---- type: three reading distances, one shared A−/A+ step
 --
 -- DZIŚ is read from across the kitchen, the lists are scanned at arm's
 -- length, a recipe is read over a pot. One size cannot serve all three, so
--- each remembers its own step. Sizes go through faceFull (PW3-tuned by eye
+-- each keeps its own base size; the step on top is the shared A± value.
+-- Sizes go through faceFull (PW3-tuned by eye
 -- on 2026-11-03: the recipe size is right at the stove, the others smaller).
-local FOOOD_FONT_MIN, FOOOD_FONT_MAX = -2, 3
 local FOOOD_SIZES = {
     today = { big = 13, row = 11, small = 10 }, -- a five-meal day on one page
     lists = { big = 13, row = 13, small = 11 },
@@ -3565,11 +3564,6 @@ local FOOOD_SIZES = {
 
 -- a no-break space keeps the chevron on the title's last line
 local NBSP_CHEVRON = "\u{00A0}\u{00A0}›"
-
-local function fooodSteps()
-    local s = get("readingos_foood_font")
-    return type(s) == "table" and s or {}
-end
 
 --- string.upper is bytewise: it would leave "DRUGIE śNIADANIE".
 local PL_UPPER = { ["ą"] = "Ą", ["ć"] = "Ć", ["ę"] = "Ę", ["ł"] = "Ł", ["ń"] = "Ń",
@@ -3584,18 +3578,18 @@ function FooodView:fontKind()
     return self.tab == "today" and "today" or "lists"
 end
 
+-- The step is the one shared A± value (readingos_kitchen_font); the kitchen
+-- block is defined further down, so it is reached through ReadingOS._Kitchen at call time.
 function FooodView:fontStep()
-    return tonumber(fooodSteps()[self:fontKind()]) or 0
+    return ReadingOS._Kitchen.fontStep()
 end
 
 function FooodView:setFontStep(delta)
-    local steps = fooodSteps()
-    local kind = self:fontKind()
-    local n = math.max(FOOOD_FONT_MIN, math.min(FOOOD_FONT_MAX, (tonumber(steps[kind]) or 0) + delta))
-    if n == (tonumber(steps[kind]) or 0) then return end
-    steps[kind] = n
-    set("readingos_foood_font", steps)
-    track("jedzenie", "font", kind .. " " .. n)
+    local K = ReadingOS._Kitchen
+    local n = math.max(K.ZOOM_MIN, math.min(K.ZOOM_MAX, K.fontStep() + delta))
+    if n == K.fontStep() then return end
+    set("readingos_kitchen_font", n)
+    track("jedzenie", "font", self:fontKind() .. " " .. n)
     self.page = 1
     self:redraw()
 end
@@ -3867,9 +3861,9 @@ function FooodView:build()
                     TextWidget:new { text = title, face = f_bar_b, bold = true, max_width = title_w - Screen:scaleBySize(16) } } },
             vline(inner_h),
             cell(font_w, TextWidget:new { text = "A−", face = faceFull(SIZE_META), bold = true,
-                fgcolor = step <= FOOOD_FONT_MIN and Blitbuffer.COLOR_GRAY_9 or nil }), vline(inner_h),
+                fgcolor = step <= ReadingOS._Kitchen.ZOOM_MIN and Blitbuffer.COLOR_GRAY_9 or nil }), vline(inner_h),
             cell(font_w, TextWidget:new { text = "A+", face = faceFull(SIZE_HEAD), bold = true,
-                fgcolor = step >= FOOOD_FONT_MAX and Blitbuffer.COLOR_GRAY_9 or nil }), vline(inner_h),
+                fgcolor = step >= ReadingOS._Kitchen.ZOOM_MAX and Blitbuffer.COLOR_GRAY_9 or nil }), vline(inner_h),
             cell(time_w, TextWidget:new { text = stamp, face = f_bar, fgcolor = soft, max_width = time_w }),
         } }
     local x0 = pad + bord
@@ -4131,6 +4125,7 @@ local function kface(n, raw)
     local size = raw and px(n) or zpx(n)
     return Font:getFace("cfont", math.max(1, math.floor(size / dpi + 0.5)))
 end
+Kitchen.zpx, Kitchen.kface = zpx, kface -- reachable from the screens above and below this block
 
 local function ktext(s, n, bold, max_w, white)
     return TextWidget:new {
@@ -7349,15 +7344,12 @@ local CraftView = InputContainer:extend {
 }
 
 -- The instruction's size is the one thing on this screen a reader adjusts:
--- five steps, three points apart, around the size the screen was tuned at.
--- Stored in G_reader_settings like every other ReadingOS setting (never on
--- the server — it is a property of these eyes and this panel), and read on
--- every build so a level survives ticks, redraws and reopening the pattern.
-local CRAFT_FONT_MIN, CRAFT_FONT_MAX, CRAFT_FONT_STEP = -2, 2, 3
+-- steps three points apart, around the size the screen was tuned at. The step
+-- is the shared A± value (readingos_kitchen_font, -2..+3), read on every build.
+local CRAFT_FONT_MIN, CRAFT_FONT_MAX, CRAFT_FONT_STEP = -2, 3, 3
 
 local function craftFontLevel()
-    local n = tonumber(get("readingos_craft_font")) or 0
-    return math.max(CRAFT_FONT_MIN, math.min(CRAFT_FONT_MAX, math.floor(n)))
+    return math.max(CRAFT_FONT_MIN, math.min(CRAFT_FONT_MAX, ReadingOS._Kitchen.fontStep()))
 end
 
 --- Step the instruction size and redraw in place. The cursor, the done flags
@@ -7366,7 +7358,7 @@ end
 function CraftView:setFontLevel(level)
     level = math.max(CRAFT_FONT_MIN, math.min(CRAFT_FONT_MAX, level))
     if level == craftFontLevel() then return end
-    set("readingos_craft_font", level)
+    set("readingos_kitchen_font", level)
     track("craft", "font", tostring(level))
     self:redraw()
 end
