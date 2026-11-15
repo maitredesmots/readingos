@@ -3216,7 +3216,7 @@ function ReadingOS:openMore(dashboard, start_tab)
             }
         end
         local settings = self:settingsItems()
-        settings.text = _("Ustawienia")
+        settings.text = _("Zaawansowane")
         settings.icon = "appbar.settings"
         tabs[#tabs + 1] = settings
         local info = {
@@ -3254,10 +3254,12 @@ function ReadingOS:openMore(dashboard, start_tab)
     end
 end
 
---- Settings alone (Tools → ReadingOS when the dashboard cannot open): the
---- same WIĘCEJ menu without a dashboard, opened on its USTAWIENIA tab.
-function ReadingOS:openSettings()
-    return self:openMore(nil, 1)
+--- The one settings screen (Q212): full-size, in the current orientation. With
+--- no token (the dashboard cannot open) the menu entry lands on its INNE tab,
+--- where the server and the token are. The old list is WIĘCEJ → Zaawansowane
+--- (openMore(nil, 1) without a dashboard).
+function ReadingOS:openSettings(tab)
+    return ReadingOS._Kitchen.openSettings(self, tab)
 end
 
 function ReadingOS:openScreen(dashboard, screen)
@@ -6825,150 +6827,332 @@ function View:choices(x0, y0, w, h, items, pick, mk)
     return cell(w, h, row, 0)
 end
 
-function View:buildSettings(x0, w, H)
-    local cfg = Kitchen.cfg()
-    local pad = px(14)
-    local lw = px(280)
-    local rw = w - px(3) - lw
-    local iw = lw - 2 * pad
+-- ---- Ustawienia (Q212): one builder for KUCHNIA and for the full-screen
+-- opener (home, TERAZ). Four tabs under the header; the tab you open on is
+-- ODŚWIEŻANIE. It lays itself out for how the Kindle is held: wider than tall
+-- = two columns, else one. A tab's content is a list of blocks flowed into the
+-- columns; what does not fit goes to a next page (‹ n/m ›), so no control is
+-- ever off the screen at any A± step.
+Kitchen.STABS = {
+    { key = "screen", label = "EKRAN" }, { key = "refresh", label = "ODŚWIEŻANIE" },
+    { key = "show", label = "POKAZUJ" }, { key = "other", label = "INNE" },
+}
 
-    -- left column
-    local left = VerticalGroup:new { align = "left" }
-    local hh = px(56)
-    local xw = px(48)
-    table.insert(left, VerticalGroup:new { align = "left",
+--- A button that cannot be tapped (A− at the minimum): same shape, grey.
+local function offButton(w, h, label, n)
+    return FrameContainer:new { bordersize = px(3), radius = px(8), padding = 0, margin = 0,
+        width = w, height = h, color = Blitbuffer.COLOR_GRAY_9,
+        cell(w - 2 * px(3), h - 2 * px(3), TextWidget:new { text = label, face = kface(n), bold = true,
+            fgcolor = Blitbuffer.COLOR_GRAY_9 }, 0, true) }
+end
+
+function Kitchen.settingsBuild(host, x0, w, H)
+    local cfg = Kitchen.cfg()
+    local plugin = host.plugin
+    local pad = px(14)
+    local ncols = w > H and 2 or 1
+    host.ncols = ncols
+    local sep = ncols == 2 and px(3) or 0
+    -- sideways the left column keeps its drawn 280 and the right one the rest,
+    -- as KUCHNIA's refresh screen always had it (the CISZA rows need the width)
+    local colws = ncols == 2 and { px(280), w - sep - px(280) } or { w }
+    local bh, ch = zpx(24), zpx(56)
+    local tab = host.stab or "refresh"
+
+    -- ---- header + tab strip
+    local hh, xw = px(56), px(48)
+    local head = VerticalGroup:new { align = "left",
         HorizontalGroup:new { align = "center",
-            cell(lw - xw - pad, hh - px(3), ktext(_("Odświeżanie"), 22, true, lw - xw - 2 * pad), pad),
+            cell(w - xw - pad, hh - px(3), ktext(_("Ustawienia"), 22, true, w - xw - 2 * pad), pad),
             FrameContainer:new { bordersize = px(3), radius = px(8), padding = 0, margin = 0, width = xw, height = xw,
                 cell(xw - 2 * px(3), xw - 2 * px(3), icon("k_x", px(20)), 0, true) },
         },
-        hline(lw, 3) })
-    self:claim(x0 + lw - xw - pad, 0, x0 + lw, hh, { kind = "s_close" })
-    local y = hh
-    local shown = self.offline and self.saved_at or (not self.offline and self.fetched_at) or nil
-    local line2 = Kitchen.status(self):gsub("^[^·]*· ?", "")
-    if cfg.auto and line2:find(_("następne"), 1, true) == 1 then
-        line2 = string.format(_("co %d min · "), cfg.every) .. line2
+        hline(w, 3) }
+    host:claim(x0 + w - xw - pad, 0, x0 + w, hh, { kind = "s_close" })
+    local th = math.max(zpx(40), px(36))
+    local tgap = px(6)
+    local tw = math.floor((w - 2 * pad - (#Kitchen.STABS - 1) * tgap) / #Kitchen.STABS)
+    local strip = HorizontalGroup:new { align = "center" }
+    local sx = x0 + pad
+    for i, st in ipairs(Kitchen.STABS) do
+        if i > 1 then table.insert(strip, HorizontalSpan:new { width = tgap }) end
+        table.insert(strip, button(tw, th - px(6), _(st.label), 12, st.key == tab))
+        host:claim(sx, hh, sx + tw + (i < #Kitchen.STABS and tgap or 0), hh + th, { kind = "s_tab", tab = st.key })
+        sx = sx + tw + tgap
     end
-    local sh = zpx(60)
-    table.insert(left, cell(lw, sh, VerticalGroup:new { align = "left",
-        ktext(_("Stan na ") .. (shown and Kitchen.clock(shown) or "?"), 22, true, iw),
-        ktext(line2, 12, false, iw) }, pad))
-    y = y + sh
-    local rh = zpx(64)
-    table.insert(left, cell(lw, rh, FrameContainer:new {
-        background = Blitbuffer.COLOR_BLACK, bordersize = 0, radius = px(8), padding = 0, margin = 0,
-        width = iw, height = rh - px(10),
-        cell(iw, rh - px(10), ktext(_("ODŚWIEŻ TERAZ"), 18, true, iw - px(16), true), 0, true) }, pad))
-    self:claim(x0, y, x0 + lw, y + rh, { kind = "refresh" })
-    y = y + rh
-    local bh, ch = zpx(24), zpx(56)
-    local function onoff(label, pick, kind)
-        table.insert(left, band(lw, label))
-        y = y + bh
-        table.insert(left, cell(lw, ch, self:choices(x0 + pad, y, iw, ch,
-            { { label = _("WŁ"), value = true }, { label = _("WYŁ"), value = false } }, pick,
-            function(v) return { kind = kind, on = v } end), pad))
-        y = y + ch
-    end
-    onoff(_("SAMO SIĘ ODŚWIEŻA"), cfg.auto, "s_auto")
-    table.insert(left, band(lw, _("CO ILE · MIN")))
-    y = y + bh
-    local every = {}
-    for _i, n in ipairs(Quiet.EVERY) do every[#every + 1] = { label = tostring(n), value = n } end
-    table.insert(left, cell(lw, ch, self:choices(x0 + pad, y, iw, ch, every, cfg.every,
-        function(v) return { kind = "s_every", n = v } end), pad))
-    y = y + ch
-    onoff(_("PODŚWIETLENIE W CISZY"), cfg.light_on, "s_light")
+    local top = hh + th
 
-    -- right column
-    local rx = x0 + lw + px(3)
-    local riw = rw - 2 * pad
-    local right = VerticalGroup:new { align = "left" }
-    table.insert(right, band(rw, _("CISZA · W TYCH GODZINACH NIE ODŚWIEŻA")))
-    local ry = bh
-    local lh = math.max(zpx(46), px(40)) -- 18 pt times have a floor too
-    local bth = lh - px(8)
-    for i, win in ipairs(cfg.windows) do
-        local days = (Quiet.DAY_LABEL[win.days] or "") .. " ›"
-        local dw = Kitchen.btnW(days, 12, px(110))
-        table.insert(right, cell(rw, lh, HorizontalGroup:new { align = "center",
-            button(dw, bth, days, 12, false),
-            HorizontalSpan:new { width = riw - dw - px(44) },
-            cell(px(44), bth, icon("k_x", px(18)), 0, true) }, pad))
-        self:claim(rx + pad, ry, rx + pad + dw, ry + lh, { kind = "s_days", i = i })
-        self:claim(rx + rw - pad - px(44), ry, rx + rw, ry + lh, { kind = "s_del", i = i })
-        ry = ry + lh
-        local tw = Kitchen.btnW("22:30", 18, px(64))
-        local sw = px(34)
-        local do_w = ktext(_("do"), 14, true):getSize().w + 2 * px(8)
-        local row = HorizontalGroup:new { align = "center" }
-        local x = rx + pad
-        local function field(key, value)
-            local other = key == "from" and win.to or win.from
-            for _j, part in ipairs { { "−", -30 }, { "t" }, { "+", 30 } } do
-                if part[1] == "t" then
-                    table.insert(row, button(tw, bth, Quiet.hm(value), 18, true))
-                    x = x + tw
-                else
-                    table.insert(row, button(sw, bth, part[1], 18, false))
-                    if Quiet.step(value, part[2], other) ~= value then
-                        self:claim(x, ry, x + sw, ry + lh, { kind = "s_time", i = i, key = key, delta = part[2] })
-                    end
-                    x = x + sw
+    -- ---- blocks: { h, draw(x, y, w) -> widget of that width and height, newcol }
+    local function onoff(label, pick, mk)
+        return { h = bh + ch, draw = function(x, y, bw)
+            return VerticalGroup:new { align = "left", band(bw, label),
+                cell(bw, ch, host:choices(x + pad, y + bh, bw - 2 * pad, ch,
+                    { { label = _("WŁ"), value = true }, { label = _("WYŁ"), value = false } }, pick, mk), pad) }
+        end }
+    end
+    local function toggle(label, key, pick)
+        return onoff(label, pick and true or false, function(v) return { kind = "s_toggle", key = key, on = v } end)
+    end
+    --- band + [−] value [+]; `mk(delta)` makes the target, nil = not tappable
+    local function stepper(label, text, mk_minus, mk_plus, icon_name)
+        return { h = bh + ch, draw = function(x, y, bw)
+            local bwid, gap = px(90), px(6)
+            local iw = bw - 2 * pad
+            local mid = iw - 2 * bwid - 2 * gap
+            local function one(label_, mk, bx)
+                if mk then
+                    host:claim(bx, y + bh, bx + bwid, y + bh + ch, mk)
+                    return button(bwid, ch - px(8), label_, 18, false)
                 end
+                return offButton(bwid, ch - px(8), label_, 18)
             end
-        end
-        field("from", win.from)
-        table.insert(row, cell(do_w, bth, ktext(_("do"), 14, true), 0, true))
-        x = x + do_w
-        field("to", win.to)
-        table.insert(right, VerticalGroup:new { align = "left", cell(rw, lh - px(1), row, pad), hline(rw) })
-        ry = ry + lh
+            local row = HorizontalGroup:new { align = "center",
+                one("−", mk_minus, x + pad), HorizontalSpan:new { width = gap },
+                cell(mid, ch, ktext(text, 18, true, mid), 0, true), HorizontalSpan:new { width = gap },
+                one("+", mk_plus, x + pad + bwid + gap + mid + gap) }
+            return VerticalGroup:new { align = "left", band(bw, label), cell(bw, ch, row, pad) }
+        end }
     end
-    if #cfg.windows == 0 then
-        table.insert(right, cell(rw, 2 * lh, ktext(_("Brak — odświeża też w nocy."), 14, false, riw), pad))
-        ry = ry + 2 * lh
+    local function action(label, target, black, h)
+        return { h = h or zpx(64), draw = function(x, y, bw)
+            local bh2 = (h or zpx(64)) - px(10)
+            host:claim(x, y, x + bw, y + (h or zpx(64)), target)
+            return cell(bw, h or zpx(64), black and FrameContainer:new {
+                background = Blitbuffer.COLOR_BLACK, bordersize = 0, radius = px(8), padding = 0, margin = 0,
+                width = bw - 2 * pad, height = bh2,
+                cell(bw - 2 * pad, bh2, ktext(label, 18, true, bw - 2 * pad - px(16), true), 0, true) }
+                or button(bw - 2 * pad, bh2, label, 14, false), pad)
+        end }
     end
-    local add_h = zpx(56)
-    local full = #cfg.windows >= Quiet.MAX
-    local add = _("+ DODAJ OKNO")
-    local aw = Kitchen.btnW(add, 14, 0)
-    local hint = full and _("najwyżej 3 okna") or _("krok 30 min · bez klawiatury")
-    table.insert(right, cell(rw, add_h, HorizontalGroup:new { align = "center",
-        full and FrameContainer:new { bordersize = px(3), radius = px(8), padding = 0, margin = 0,
-            width = aw, height = add_h - px(10), color = Blitbuffer.COLOR_GRAY_9,
-            cell(aw - 2 * px(3), add_h - px(10) - 2 * px(3), TextWidget:new { text = add, face = kface(14), bold = true,
-                fgcolor = Blitbuffer.COLOR_GRAY_9 }, 0, true) }
-            or button(aw, add_h - px(10), add, 14, false),
-        HorizontalSpan:new { width = px(12) },
-        ktext(hint, 12, false, math.max(1, riw - aw - px(12))) }, pad))
-    if not full then self:claim(rx + pad, ry, rx + pad + aw, ry + add_h, { kind = "s_add" }) end
-    ry = ry + add_h
-    local nh = math.max(zpx(22), px(20)) -- 12 pt text has a floor; the box keeps up
-    local lines = { _("ODŚWIEŻ TERAZ działa zawsze —"), _("także w ciszy i przy wyłączonym.") }
-    local _qs, qe = Quiet.span(cfg.windows, os.time())
-    local ends = qe or (function()
-        local st = Quiet.nextStart(cfg.windows, os.time())
-        local _s2, e2 = st and Quiet.span(cfg.windows, st)
-        return e2
-    end)()
-    if not cfg.auto then
-        lines[3] = _("WYŁ: ekran zmienia się tylko po ODŚWIEŻ TERAZ.")
-    elseif ends then
-        lines[3] = _("Po ciszy ekran odświeża się sam o ") .. Kitchen.clock(ends) .. "."
-    end
-    table.insert(right, VerticalSpan:new { width = H - ry - 3 * nh - px(10) })
-    for _i, l in ipairs(lines) do
-        table.insert(right, cell(rw, nh, TextWidget:new { text = l, face = kface(12), max_width = riw,
-            fgcolor = Blitbuffer.COLOR_GRAY_5 or Blitbuffer.COLOR_BLACK }, pad))
+    local function lines(list, n, h)
+        return { h = h or zpx(60), draw = function(_x, _y, bw)
+            local g = VerticalGroup:new { align = "left" }
+            for i, l in ipairs(list) do
+                table.insert(g, ktext(l, i == 1 and 22 or n or 12, i == 1, bw - 2 * pad))
+            end
+            return cell(bw, h or zpx(60), g, pad)
+        end }
     end
 
-    return HorizontalGroup:new { align = "top",
-        FrameContainer:new { bordersize = 0, padding = 0, margin = 0, width = lw, height = H, left },
-        vline(H),
-        FrameContainer:new { bordersize = 0, padding = 0, margin = 0, width = rw, height = H, right },
-    }
+    local blocks = {}
+    local function add(b) blocks[#blocks + 1] = b end
+
+    if tab == "screen" then
+        local step = Kitchen.fontStep()
+        add(stepper(_("TEKST · A−  A+"), tostring(step > 0 and ("+" .. step) or step),
+            step > Kitchen.ZOOM_MIN and { kind = "s_zoom", delta = -1 } or nil,
+            step < Kitchen.ZOOM_MAX and { kind = "s_zoom", delta = 1 } or nil))
+        local level = plugin.lightLevel and plugin:lightLevel()
+        if level then
+            local max = plugin.lightMax and plugin:lightMax()
+            add(stepper(_("PODŚWIETLENIE"), level <= 0 and _("WYŁ") or tostring(level),
+                level > 0 and { kind = "s_sun", delta = -LIGHT_STEP } or nil,
+                not (max and level >= max) and { kind = "s_sun", delta = LIGHT_STEP } or nil))
+        end
+        add(toggle(_("PODŚWIETLENIE W CISZY"), "readingos_kitchen_quiet_light", cfg.light_on))
+    elseif tab == "refresh" then
+        local shown = host.offline and host.saved_at or (not host.offline and host.fetched_at) or nil
+        local line2 = Kitchen.status(host):gsub("^[^·]*· ?", "")
+        if cfg.auto and line2:find(_("następne"), 1, true) == 1 then
+            line2 = string.format(_("co %d min · "), cfg.every) .. line2
+        end
+        add(lines({ shown and (_("Stan na ") .. Kitchen.clock(shown)) or _("Odświeżanie"), line2 }, 12, zpx(60)))
+        add(action(_("ODŚWIEŻ TERAZ"), { kind = "s_refresh" }, true))
+        add(toggle(_("SAMO SIĘ ODŚWIEŻA"), "readingos_kitchen_auto", cfg.auto))
+        local every = {}
+        for _i, n in ipairs(Quiet.EVERY) do every[#every + 1] = { label = tostring(n), value = n } end
+        add({ h = bh + ch, draw = function(x, y, bw)
+            return VerticalGroup:new { align = "left", band(bw, _("CO ILE · MIN")),
+                cell(bw, ch, host:choices(x + pad, y + bh, bw - 2 * pad, ch, every, cfg.every,
+                    function(v) return { kind = "s_every", n = v } end), pad) }
+        end })
+        add({ h = bh, newcol = true, draw = function(_x, _y, bw)
+            return band(bw, _("CISZA · W TYCH GODZINACH NIE ODŚWIEŻA"))
+        end })
+        local lh = math.max(zpx(46), px(40)) -- 18 pt times have a floor too
+        local bth = lh - px(8)
+        local tbw, sw = Kitchen.btnW("22:30", 18, px(64)), px(34)
+        local do_w = ktext(_("do"), 14, true):getSize().w + 2 * px(8)
+        for i, win in ipairs(cfg.windows) do
+            local days = (Quiet.DAY_LABEL[win.days] or "") .. " ›"
+            local dw = Kitchen.btnW(days, 12, px(110))
+            local xbtn = px(44)
+            -- all on one line when the column is wide enough (upright), else two
+            local one = dw + 2 * (2 * sw + tbw) + do_w + xbtn + px(12) <= colws[ncols] - 2 * pad
+            add({ h = one and lh or 2 * lh, draw = function(x, y, bw)
+                local iw = bw - 2 * pad
+                local fx = x + pad
+                local function field(row, key, value, fy)
+                    local other = key == "from" and win.to or win.from
+                    local cx = fx
+                    for _j, part in ipairs { { "−", -30 }, { "t" }, { "+", 30 } } do
+                        if part[1] == "t" then
+                            table.insert(row, button(tbw, bth, Quiet.hm(value), 18, true))
+                            cx = cx + tbw
+                        else
+                            table.insert(row, button(sw, bth, part[1], 18, false))
+                            if Quiet.step(value, part[2], other) ~= value then
+                                host:claim(cx, fy, cx + sw, fy + lh, { kind = "s_time", i = i, key = key, delta = part[2] })
+                            end
+                            cx = cx + sw
+                        end
+                    end
+                    return cx
+                end
+                local function dayBtn(row, dy)
+                    table.insert(row, button(dw, bth, days, 12, false))
+                    host:claim(x + pad, dy, x + pad + dw, dy + lh, { kind = "s_days", i = i })
+                end
+                local function delBtn(dy)
+                    host:claim(x + bw - pad - xbtn, dy, x + bw, dy + lh, { kind = "s_del", i = i })
+                    return cell(xbtn, bth, icon("k_x", px(18)), 0, true)
+                end
+                if one then
+                    local row = HorizontalGroup:new { align = "center" }
+                    dayBtn(row, y)
+                    fx = x + pad + dw + px(6)
+                    table.insert(row, HorizontalSpan:new { width = px(6) })
+                    fx = field(row, "from", win.from, y)
+                    table.insert(row, cell(do_w, bth, ktext(_("do"), 14, true), 0, true))
+                    fx = fx + do_w
+                    field(row, "to", win.to, y)
+                    table.insert(row, HorizontalSpan:new { width = math.max(0, iw - (fx - x - pad) - (2 * sw + tbw) - xbtn) })
+                    table.insert(row, delBtn(y))
+                    return VerticalGroup:new { align = "left", cell(bw, lh - px(1), row, pad), hline(bw) }
+                end
+                local r1 = HorizontalGroup:new { align = "center" }
+                dayBtn(r1, y)
+                table.insert(r1, HorizontalSpan:new { width = iw - dw - xbtn })
+                table.insert(r1, delBtn(y))
+                local r2 = HorizontalGroup:new { align = "center" }
+                fx = field(r2, "from", win.from, y + lh)
+                table.insert(r2, cell(do_w, bth, ktext(_("do"), 14, true), 0, true))
+                fx = fx + do_w
+                field(r2, "to", win.to, y + lh)
+                return VerticalGroup:new { align = "left", cell(bw, lh, r1, pad), cell(bw, lh - px(1), r2, pad), hline(bw) }
+            end })
+        end
+        if #cfg.windows == 0 then
+            add({ h = 2 * lh, draw = function(_x, _y, bw)
+                return cell(bw, 2 * lh, ktext(_("Brak — odświeża też w nocy."), 14, false, bw - 2 * pad), pad)
+            end })
+        end
+        local full = #cfg.windows >= Quiet.MAX
+        local addl = _("+ DODAJ OKNO")
+        local aw = Kitchen.btnW(addl, 14, 0)
+        local add_h = zpx(56)
+        add({ h = add_h, draw = function(x, y, bw)
+            local hint = full and _("najwyżej 3 okna") or _("krok 30 min · bez klawiatury")
+            if not full then host:claim(x + pad, y, x + pad + aw, y + add_h, { kind = "s_add" }) end
+            return cell(bw, add_h, HorizontalGroup:new { align = "center",
+                full and offButton(aw, add_h - px(10), addl, 14) or button(aw, add_h - px(10), addl, 14, false),
+                HorizontalSpan:new { width = px(12) },
+                ktext(hint, 12, false, math.max(1, bw - 2 * pad - aw - px(12))) }, pad)
+        end })
+        local nl = { _("ODŚWIEŻ TERAZ działa zawsze —"), _("także w ciszy i przy wyłączonym.") }
+        local _qs, qe = Quiet.span(cfg.windows, os.time())
+        local ends = qe or (function()
+            local st = Quiet.nextStart(cfg.windows, os.time())
+            local _s2, e2 = st and Quiet.span(cfg.windows, st)
+            return e2
+        end)()
+        if not cfg.auto then
+            nl[3] = _("WYŁ: ekran zmienia się tylko po ODŚWIEŻ TERAZ.")
+        elseif ends then
+            nl[3] = _("Po ciszy ekran odświeża się sam o ") .. Kitchen.clock(ends) .. "."
+        end
+        local nh = math.max(zpx(22), px(20))
+        add({ h = 3 * nh, draw = function(_x, _y, bw)
+            local g = VerticalGroup:new { align = "left" }
+            for _i, l in ipairs(nl) do
+                table.insert(g, cell(bw, nh, TextWidget:new { text = l, face = kface(12), max_width = bw - 2 * pad,
+                    fgcolor = Blitbuffer.COLOR_GRAY_5 or Blitbuffer.COLOR_BLACK }, pad))
+            end
+            return g
+        end })
+    elseif tab == "show" then
+        add(toggle(_("POGODA"), "readingos_show_weather", get("readingos_show_weather")))
+        add(toggle(_("OKŁADKA KSIĄŻKI"), "readingos_show_cover", get("readingos_show_cover")))
+        add(toggle(_("LICZNIKI ZAKUPY"), "readingos_show_counts", get("readingos_show_counts")))
+    else
+        local mins = math.max(1, tonumber(get("readingos_lock_minutes")) or 30)
+        add(stepper(_("BLOKADA ODBLOKUJE SIĘ PO"), mins .. " min",
+            mins > 5 and { kind = "s_lock", delta = -5 } or nil,
+            mins < 120 and { kind = "s_lock", delta = 5 } or nil))
+        add(onoff(_("EKRAN SNU READINGOS"), G_reader_settings:readSetting("screensaver_type") == ReadingOS._ssType,
+            function(v) return { kind = "s_ss", on = v } end))
+        add(action(_("Sprawdź aktualizacje") .. "  (v" .. plugin:localVersion() .. ")", { kind = "s_update" }, false, ch))
+        add(action(_("Serwer: ") .. tostring(get("readingos_url")),
+            { kind = "s_edit", key = "readingos_url", title = _("Adres serwera") }, false, ch))
+        -- the token itself is never drawn, only whether there is one
+        add(action(_("Token API: ") .. (getToken() ~= "" and _("ustawiony") or _("BRAK")),
+            { kind = "s_edit", key = "readingos_token", title = _("Token API") }, false, ch))
+    end
+
+    -- ---- flow the blocks into columns, then pages
+    local function flow(avail)
+        local pages = { { {} } }
+        for c = 2, ncols do pages[1][c] = {} end
+        local pg, col, used = 1, 1, 0
+        for _i, b in ipairs(blocks) do
+            local cur = pages[pg][col]
+            if b.newcol and ncols > 1 and #cur > 0 then
+                col, used = col + 1, 0
+            elseif used + b.h > avail and #cur > 0 then
+                col, used = col + 1, 0
+            end
+            if col > ncols then
+                pg, col, used = pg + 1, 1, 0
+                pages[pg] = {}
+                for c = 1, ncols do pages[pg][c] = {} end
+            end
+            local list = pages[pg][col]
+            list[#list + 1] = b
+            used = used + b.h
+        end
+        return pages
+    end
+    local avail = H - top
+    local pages = flow(avail)
+    local pager_h = zpx(44)
+    if #pages > 1 then
+        avail = H - top - pager_h
+        pages = flow(avail)
+    end
+    host.spages = #pages
+    local pn = math.max(1, math.min(host.spage or 1, #pages))
+    host.spage = pn
+
+    local cols = HorizontalGroup:new { align = "top" }
+    for c = 1, ncols do
+        local colw = colws[c]
+        local cx = x0 + (c > 1 and colws[1] + sep or 0)
+        local g = VerticalGroup:new { align = "left" }
+        local y = top
+        for _i, b in ipairs(pages[pn][c]) do
+            table.insert(g, b.draw(cx, y, colw))
+            y = y + b.h
+        end
+        if c > 1 then table.insert(cols, vline(avail)) end
+        table.insert(cols, FrameContainer:new { bordersize = 0, padding = 0, margin = 0, width = colw, height = avail, g })
+    end
+    local out = VerticalGroup:new { align = "left", head, strip, hline(w, 3), cols }
+    if #pages > 1 then
+        local pw = math.floor((w - 2 * pad) / 3)
+        local function pbtn(label, delta, ok, px0)
+            if ok then host:claim(px0, H - pager_h, px0 + pw, H, { kind = "s_page", delta = delta }) end
+            return ok and button(pw, pager_h - px(8), label, 18, false) or offButton(pw, pager_h - px(8), label, 18)
+        end
+        table.insert(out, cell(w, pager_h, HorizontalGroup:new { align = "center",
+            pbtn("‹", -1, pn > 1, x0 + pad),
+            cell(pw, pager_h, ktext(pn .. "/" .. #pages, 16, true), 0, true),
+            pbtn("›", 1, pn < #pages, x0 + pad + 2 * pw) }, pad))
+    end
+    return out
+end
+
+function View:buildSettings(x0, w, H)
+    return Kitchen.settingsBuild(self, x0, w, H)
 end
 
 --- Saves one change to the refresh settings, then re-plans what comes next.
@@ -6980,24 +7164,73 @@ function View:settingsSave(key, value)
     return true
 end
 
+--- ✕ in KUCHNIA: back to the screen it was opened from.
+function View:settingsClose()
+    self.screen, self.prev_screen = self.prev_screen or "tasks", nil
+    self:redraw()
+    return true
+end
+
+function View:settingsRefresh()
+    track("kuchnia", "refresh")
+    self:refresh()
+    return true
+end
+
 function View:settingsTap(t)
     local k = t.kind
     if k == "settings" then
         if self.screen ~= "settings" then
             self.prev_screen, self.screen = self.screen, "settings"
+            self.stab, self.spage = "refresh", 1 -- opens on ODŚWIEŻANIE
             track("kuchnia", "screen", "settings")
             self:redraw()
         end
         return true
     end
-    if k == "s_close" then
-        self.screen, self.prev_screen = self.prev_screen or "tasks", nil
+    if k == "s_close" then return self:settingsClose() end
+    if k == "s_refresh" then return self:settingsRefresh() end
+    if k == "s_tab" then
+        if self.stab ~= t.tab then self.stab, self.spage = t.tab, 1; self:redraw() end
+        return true
+    end
+    if k == "s_page" then
+        self.spage = math.max(1, math.min((self.spage or 1) + t.delta, self.spages or 1))
         self:redraw()
         return true
     end
-    if k == "s_auto" then return self:settingsSave("readingos_kitchen_auto", t.on) end
+    if k == "s_zoom" then
+        local n = math.max(Kitchen.ZOOM_MIN, math.min(Kitchen.ZOOM_MAX, Kitchen.fontStep() + t.delta))
+        if n ~= Kitchen.fontStep() then
+            set("readingos_kitchen_font", n)
+            track("kuchnia", "font", tostring(n))
+            self:redraw()
+        end
+        return true
+    end
+    if k == "s_sun" then
+        Kitchen.quiet_light = nil -- from here the level is Leo's choice (Q80)
+        track("kuchnia", "light", tostring(self.plugin:stepLight(t.delta)))
+        self:redraw()
+        return true
+    end
+    if k == "s_toggle" then return self:settingsSave(t.key, t.on) end
+    if k == "s_lock" then
+        local mins = math.max(1, tonumber(get("readingos_lock_minutes")) or 30)
+        return self:settingsSave("readingos_lock_minutes", math.max(5, math.min(120, mins + t.delta)))
+    end
+    if k == "s_ss" then
+        G_reader_settings:saveSetting("screensaver_type", t.on and ReadingOS._ssType or "cover")
+        G_reader_settings:flush()
+        self:redraw()
+        return true
+    end
+    if k == "s_update" then self.plugin:checkForUpdate(false); return true end
+    if k == "s_edit" then
+        self.plugin:editText(t.key, t.title, { updateItems = function() self:redraw() end })
+        return true
+    end
     if k == "s_every" then return self:settingsSave("readingos_kitchen_every", t.n) end
-    if k == "s_light" then return self:settingsSave("readingos_kitchen_quiet_light", t.on) end
     if k ~= "s_days" and k ~= "s_time" and k ~= "s_del" and k ~= "s_add" then return false end
     -- rule 5: a fresh copy of the list, edited, then handed to set()
     local wins = Kitchen.cfg().windows
@@ -7016,6 +7249,85 @@ function View:settingsTap(t)
         w[t.key] = Quiet.step(w[t.key], t.delta, other)
     end
     return self:settingsSave("readingos_kitchen_quiet", wins)
+end
+
+-- The same screen full-size, in whatever orientation the Kindle is in (home,
+-- TERAZ, Tools → ReadingOS). It never rotates. It borrows View's tap
+-- handling and widgets; there is no rail and no data of its own.
+local SettingsView = InputContainer:extend { plugin = nil, stab = "refresh", spage = 1 }
+Kitchen.SettingsView = SettingsView
+SettingsView.targetAt = Dashboard.targetAt
+SettingsView.claim = View.claim
+SettingsView.choices = View.choices
+SettingsView.settingsTap = View.settingsTap
+SettingsView.settingsSave = View.settingsSave
+
+function SettingsView:init()
+    self.dimen = Geom:new { x = 0, y = 0, w = Screen:getWidth(), h = Screen:getHeight() }
+    self.covers_fullscreen = true
+    self.readingos_screen = "settings"
+    self.hit = {}
+    if Device:isTouchDevice() then
+        self.ges_events = { Tap = { GestureRange:new { ges = "tap", range = self.dimen } } }
+    end
+    self[1] = self:build()
+end
+
+function SettingsView:build()
+    self.hit = {}
+    local W, H = self.dimen.w, self.dimen.h
+    return FrameContainer:new { background = Blitbuffer.COLOR_WHITE, bordersize = 0, padding = 0, margin = 0,
+        width = W, height = H, Kitchen.settingsBuild(self, 0, W, H) }
+end
+
+function SettingsView:redraw()
+    local old = self[1]
+    self[1] = nil
+    if old and old.free then pcall(function() old:free() end) end
+    self[1] = self:build()
+    UIManager:setDirty(self, "ui")
+end
+
+function SettingsView:schedule() end -- the screen under it re-plans when this closes
+
+function SettingsView:onTap(_arg, ges)
+    local t = self:targetAt(ges.pos.x, ges.pos.y)
+    if not t then return true end
+    return self:settingsTap(t)
+end
+
+function SettingsView:settingsClose() return self:onClose() end
+
+--- Closing re-plans what is underneath: home's timer, or TERAZ's next event.
+function SettingsView:onClose()
+    if self.closed then return true end
+    self.closed = true
+    UIManager:close(self)
+    local top = UIManager:getTopmostVisibleWidget()
+    if top and top ~= self then
+        if top.scheduleAuto then top:scheduleAuto() elseif top.teraz then top.next_event = nil end
+    end
+    return true
+end
+SettingsView.onSuspend = SettingsView.onClose
+
+--- ODŚWIEŻ TERAZ from the full-screen settings: close it, refresh what is under it.
+function SettingsView:settingsRefresh()
+    self:onClose()
+    local top = UIManager:getTopmostVisibleWidget()
+    track("ustawienia", "refresh")
+    if top and top.scheduleAuto then
+        self.plugin:refreshInto(top)
+    elseif top and top.teraz and top.terazRefresh then
+        top:terazRefresh("full")
+    end
+    return true
+end
+
+--- Shows it; `tab` = screen | refresh | show | other (default ODŚWIEŻANIE).
+function Kitchen.openSettings(plugin, tab)
+    track("ustawienia", "open", tab)
+    UIManager:show(SettingsView:new { plugin = plugin, stab = tab or "refresh" })
 end
 
 function ReadingOS:openKitchen(dashboard)
@@ -8222,6 +8534,7 @@ end
 -- may reintroduce a guessed height.
 
 local SS_TYPE = "readingos"
+ReadingOS._ssType = SS_TYPE -- the settings screen toggles it
 local SS_CACHE_FILE = DataStorage:getDataDir() .. "/cache/readingos-screensaver.json"
 
 -- One knob for the whole sleep screen, in KOReader font units (DPI scaling
@@ -10024,7 +10337,7 @@ function ReadingOS:addToMainMenu(menu_items)
         text = _("ReadingOS"),
         sorting_hint = "tools",
         callback = function()
-            if not self:showDashboard() then self:openSettings() end
+            if not self:showDashboard() then self:openSettings("other") end
         end,
     }
 end
@@ -10046,16 +10359,12 @@ end
 function ReadingOS:settingsItems()
     return {
             {
-                text_func = function() return "Serwer: " .. get("readingos_url") end,
-                keep_menu_open = true,
-                callback = function(touchmenu) self:editText("readingos_url", _("Adres serwera"), touchmenu) end,
-            },
-            {
-                text_func = function()
-                    return "Token API: " .. (getToken() ~= "" and "ustawiony" or "BRAK")
+                text = _("Ustawienia ekranu ›"),
+                callback = function(touchmenu)
+                    if touchmenu and touchmenu.close_callback then touchmenu.close_callback() end
+                    self:openSettings()
                 end,
-                keep_menu_open = true,
-                callback = function(touchmenu) self:editText("readingos_token", _("Token API"), touchmenu) end,
+                separator = true,
             },
             {
                 text_func = function()
@@ -10068,19 +10377,6 @@ function ReadingOS:settingsItems()
                     if touchmenu then touchmenu:updateItems() end
                 end,
                 separator = true,
-            },
-            {
-                text_func = function()
-                    return "Ekran snu: " ..
-                        (G_reader_settings:readSetting("screensaver_type") == SS_TYPE and "ReadingOS" or "inny")
-                end,
-                keep_menu_open = true,
-                callback = function(touchmenu)
-                    local on = G_reader_settings:readSetting("screensaver_type") == SS_TYPE
-                    G_reader_settings:saveSetting("screensaver_type", on and "cover" or SS_TYPE)
-                    G_reader_settings:flush()
-                    if touchmenu then touchmenu:updateItems() end
-                end,
             },
             {
                 text_func = function()
@@ -10126,27 +10422,6 @@ function ReadingOS:settingsItems()
             },
             {
                 text_func = function()
-                    return "Blokada odblokuje się sama po: " ..
-                        (math.max(1, tonumber(get("readingos_lock_minutes")) or 30)) .. " min"
-                end,
-                keep_menu_open = true,
-                callback = function(touchmenu)
-                    local SpinWidget = require("ui/widget/spinwidget")
-                    UIManager:show(SpinWidget:new {
-                        title_text = _("Odblokuj sam po (minut)"),
-                        value = math.max(1, tonumber(get("readingos_lock_minutes")) or 30),
-                        value_min = 5,
-                        value_max = 120,
-                        value_step = 5,
-                        callback = function(spin)
-                            set("readingos_lock_minutes", spin.value)
-                            if touchmenu then touchmenu:updateItems() end
-                        end,
-                    })
-                end,
-            },
-            {
-                text_func = function()
                     local m = tonumber(get("readingos_teraz_minutes")) or 0
                     return "TERAZ wyłącza się po: " .. (m > 0 and (m .. " min") or "bez limitu")
                 end,
@@ -10174,10 +10449,7 @@ function ReadingOS:settingsItems()
                 end,
                 separator = true,
             },
-            onOffItem("readingos_show_weather", "Pogoda (nagłówek + sen)"),
-            onOffItem("readingos_show_cover", "Okładka książki"),
             onOffItem("readingos_show_tasks_preview", "Podgląd ZADANIA"),
-            onOffItem("readingos_show_counts", "Liczniki ZAKUPY/DOM"),
             onOffItem("readingos_show_header_info", "Wi-Fi/SSID/wersja w nagłówku"),
             onOffItem("readingos_update_on_open", "Sprawdzanie aktualizacji przy otwarciu"),
             onOffItem("readingos_telemetry", "Telemetria"),
@@ -10208,11 +10480,6 @@ function ReadingOS:settingsItems()
                     if touchmenu then touchmenu:updateItems() end
                 end,
                 separator = true,
-            },
-            {
-                text_func = function() return _("Sprawdź aktualizacje") .. "  (v" .. self:localVersion() .. ")" end,
-                keep_menu_open = true,
-                callback = function() self:checkForUpdate(false) end,
             },
             {
                 text = _("Testuj połączenie"),
