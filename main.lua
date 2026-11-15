@@ -668,6 +668,21 @@ end
 --- @return table|nil result, string|nil err — the reason matters: "has open
 --- steps" and "offline" need different words on screen, and collapsing both to
 --- nil is how the device ended up blaming the radio for a refused write.
+--- The one undo record for every screen of this Kindle: { label, at, undone }.
+--- Set on each successful task act; home and KUCHNIA both read it for the
+--- "✓ <label> · COFNIJ" footer, which lives ReadingOS.UNDO_S seconds.
+function ReadingOS:noteAct(label)
+    self.last_act = { label = label, at = os.time() }
+    return self.last_act
+end
+
+--- The record while its COFNIJ window is open, else nil.
+function ReadingOS:liveAct()
+    local a = self.last_act
+    if a and (os.time() - a.at) < ReadingOS.UNDO_S then return a end
+    return nil
+end
+
 function ReadingOS:act(kind, id, extra)
     local payload = { kind = kind, id = id }
     for k, v in pairs(extra or {}) do payload[k] = v end
@@ -1005,6 +1020,7 @@ end
 function Dashboard:cancelAuto()
     self.closed = true
     if self.auto_cb then UIManager:unschedule(self.auto_cb) end
+    if self.undo_cb then UIManager:unschedule(self.undo_cb) end
 end
 
 --- Register a tap target covering the next `height` pixels.
@@ -1249,16 +1265,8 @@ function Dashboard:build()
     end
     gap(8)
 
-    -- ---- undo. A tap on e-ink lands a row off more often than on a phone, so
-    -- the way back has to be visible, not a hidden gesture.
-    local undo = d.undo
-    if type(undo) == "table" and undo.label then
-        add(FrameContainer:new {
-            bordersize = bord, padding = Screen:scaleBySize(5), width = cw, radius = 0,
-            text("COFNIJ: " .. tostring(undo.label), dashFace(SIZE_META), { max_width = cw - Screen:scaleBySize(20) }),
-        }, h_meta + Screen:scaleBySize(12), { kind = "undo", label = tostring(undo.label) })
-        gap(8)
-    end
+    -- (the undo is a footer row above the nav now, from plugin.last_act; the
+    -- server's d.undo is not drawn)
 
     -- ---- update banner. Announces itself on the dashboard rather than in a
     -- popup: you came here to read, and a modal on arrival would be an ambush.
@@ -1286,7 +1294,17 @@ function Dashboard:build()
     local nav_ico = Screen:scaleBySize(24)
     local nav_h = math.max(MIN_TAP, nav_ico + Screen:scaleBySize(4) + h_label + Screen:scaleBySize(12))
     local nav_rule = Screen:scaleBySize(2)
-    local limit = H - pad - nav_rule - nav_h
+    -- ---- the undo footer: only while the shared record is live (this Kindle's
+    -- own last act, from any screen). A tap on e-ink lands a row off more often
+    -- than on a phone, so the way back is a visible row, not a hidden gesture.
+    local act = self.plugin.liveAct and self.plugin:liveAct()
+    local foot_h = act and (h_row + Screen:scaleBySize(6)) or 0
+    local limit = H - pad - nav_rule - nav_h - foot_h
+    UIManager:unschedule(self.undo_cb)
+    if act and not self.closed then
+        self.undo_cb = self.undo_cb or function() self:rebuildForUndo() end
+        UIManager:scheduleIn(ReadingOS.UNDO_S - (os.time() - act.at) + 1, self.undo_cb)
+    end
 
     local chev = Screen:scaleBySize(18)
     local f_head = dashFace(SIZE_HEAD)
@@ -1530,6 +1548,15 @@ function Dashboard:build()
         return OverlapGroup:new { dimen = Geom:new { w = nav_ico + bw, h = nav_ico }, ic, badge }
     end
 
+    if act then
+        gap(6)
+        if act.undone then
+            add(lrRow(cw, h_row, _("Cofnięte: ") .. tostring(act.label), "", dashFace(SIZE_LABEL), dashFace(SIZE_META)), h_row)
+        else
+            add(lrRow(cw, h_row, "✓ " .. tostring(act.label), "COFNIJ", dashFace(SIZE_LABEL), dashFace(SIZE_META), false),
+                h_row, { kind = "undo", label = tostring(act.label) })
+        end
+    end
     add(rule(cw), nav_rule)
     local nav_items = {
         { icon = "close", label = "ZAMKNIJ", target = { kind = "close", label = "close" } },
@@ -1620,6 +1647,17 @@ end
 function Dashboard:rebuildForCharging(charging)
     if charging == self.drawn_charging then return end
     self.drawn_charging = charging -- before build(): an event fired by its own read must match
+    local stale_root = self[1]
+    self[1] = nil
+    if stale_root and stale_root.free then pcall(function() stale_root:free() end) end
+    self.hit = {}
+    self[1] = self:build()
+    UIManager:setDirty(self, "ui")
+end
+--- The COFNIJ window ran out (or an undo changed the row): rebuild from the
+--- data already held, no request.
+function Dashboard:rebuildForUndo()
+    if self.closed then return end
     local stale_root = self[1]
     self[1] = nil
     if stale_root and stale_root.free then pcall(function() stale_root:free() end) end
@@ -2150,6 +2188,7 @@ function ReadingOS:taskAct(dashboard, row, op, extra, receipt, after)
         UIManager:show(InfoMessage:new { text = msg })
         return false
     end
+    self:noteAct(row.text)
     if after then after() end
     self:refreshInto(dashboard)
     return true
@@ -3131,7 +3170,9 @@ function ReadingOS:handle(dashboard, target, is_hold)
         track("home", "undo", target.label)
         self:receipt(_("Cofam…"))
         local res = self:act("undo")
-        if not (res and res.ok) then
+        if res and res.ok then
+            if self.last_act then self.last_act.undone = true end
+        else
             UIManager:show(InfoMessage:new { text = _("Nie da się cofnąć. Za stare, już cofnięte gdzie indziej, albo brak połączenia.") })
         end
         return self:refreshInto(dashboard)
@@ -4062,6 +4103,7 @@ local Kitchen = {}
 do
 local CACHE_FILE = DataStorage:getDataDir() .. "/cache/readingos-kitchen.json"
 local UNDO_S = 120 -- Q61: COFNIJ stays in the footer for two minutes
+ReadingOS.UNDO_S = UNDO_S -- home reads it at call time
 local RAIL = {
     { key = "tasks", icon = "k_tasks" },
     { key = "cook", icon = "k_cook" },
@@ -4485,8 +4527,8 @@ local View = InputContainer:extend {
     chip = nil,       -- nil = WSZYSTKO
     now_page = 1,
     later_page = 1,
-    last = nil,       -- { label, at, undone } — the footer's COFNIJ (Q61)
 }
+-- the footer's COFNIJ (Q61) is the plugin's shared last_act record, not a field here
 Kitchen.View = View
 View.targetAt = Dashboard.targetAt
 
@@ -4795,7 +4837,7 @@ end
 --- after a tap "✓ Wynieść śmieci · COFNIJ" in the same place (Q61).
 function View:footer(x0, y0, w, h)
     local t = (self.data or {}).tasks or {}
-    local last = self.last
+    local last = self.plugin.last_act
     local fresh = last and (os.time() - last.at) < UNDO_S
     local left, right, target
     if fresh and not last.undone then
@@ -5009,7 +5051,7 @@ function View:taskDone(t)
         self.data = Kitchen.without(self.data or {}, t.id)
     end
     if res then
-        self.last = { label = t.label, at = os.time() }
+        self.plugin:noteAct(t.label)
         UIManager:unschedule(self.undo_cb)
         UIManager:scheduleIn(UNDO_S + 1, self.undo_cb)
     else
@@ -5022,12 +5064,12 @@ function View:taskDone(t)
 end
 
 function View:undo()
-    if self.busy or not self.last then return end
+    if self.busy or not self.plugin.last_act then return end
     self.busy = true
     track("kuchnia", "undo")
     local res = self.plugin:act("undo")
     if res and res.ok then
-        self.last.undone = true
+        self.plugin.last_act.undone = true
         self.busy = false
         return self:refresh()
     end
@@ -9753,7 +9795,7 @@ function LockView:terazTap(x, y)
         track("teraz", "done", tostring(t.id))
         local res, err = self.plugin:act("task", t.id, { op = "done", label = t.label })
         if res then
-            self.last = { label = t.label, at = os.time() }
+            self.last = self.plugin:noteAct(t.label)
         else
             UIManager:show(InfoMessage:new { text = terazActError(err) })
         end
