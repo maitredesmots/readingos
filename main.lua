@@ -4390,19 +4390,36 @@ local function cacheLoad()
 end
 
 --- @return table|nil data, boolean offline, number|nil saved_at (when offline)
-function Kitchen.fetch(from)
+--- "?q=mutti&loc=3&cat=Sosy" — empty parts dropped, values url-encoded; "" when nothing is set.
+function Kitchen.query(parts)
+    local out = {}
+    for _i, kv in ipairs(parts or {}) do
+        local v = kv[2]
+        if v ~= nil and tostring(v) ~= "" then
+            out[#out + 1] = kv[1] .. "=" .. (tostring(v):gsub("[^%w%-_%.~]", function(c)
+                return string.format("%%%02X", c:byte())
+            end))
+        end
+    end
+    return #out > 0 and ("?" .. table.concat(out, "&")) or ""
+end
+
+--- `search` = the pantry's q/loc/cat as a Kitchen.query string. A filtered
+--- answer is never cached, and offline it is nil — the old list stays.
+function Kitchen.fetch(from, search)
     local ok_conn, connected = pcall(function() return NetworkMgr:isConnected() end)
     if ok_conn and connected then
-        local url = baseUrl() .. "/api/readingos/kitchen" .. (from and ("?from=" .. from) or "")
+        local qs = search or Kitchen.query { { "from", from } }
+        local url = baseUrl() .. "/api/readingos/kitchen" .. qs
         local body, err = request("GET", url)
         local data = body and decode(body)
         if payloadOk(data) then
-            if not from then cacheSave(data) end
+            if not from and not search then cacheSave(data) end
             return data, false, nil
         end
         logger.warn("ReadingOS: kitchen fetch failed:", err or "bad JSON")
     end
-    if from then return nil, true, nil end
+    if from or search then return nil, true, nil end
     local data, saved_at = cacheLoad()
     return data, true, saved_at
 end
@@ -4543,7 +4560,7 @@ end
 function View:refresh()
     if self.closed then return end
     self:syncAwake()
-    local data, offline, saved_at = Kitchen.fetch()
+    local data, offline, saved_at = Kitchen.fetch(nil, self:pantrySearchQuery())
     if data then
         self.data, self.offline, self.saved_at = data, offline, saved_at
         if not offline then self.fetched_at = os.time() end
@@ -5162,24 +5179,49 @@ end
 --- One timer at a time. It lives on the module, not the view: Czytaj or the
 --- power button close the kitchen, and a pot on the stove must not lose its
 --- timer to that. While it runs the Kindle does not auto-sleep (Q60).
-function Kitchen.timerStop()
+--- Fire and forget (Tasksss 1328): Hooome mirrors the timer to the phone and the
+--- HomePod. Deferred to the next tick and pcall'd — a dead radio or a refused
+--- write costs the kitchen nothing, and no dialog ever says so.
+function Kitchen.timerSend(plugin, extra)
+    if not plugin or not plugin.act then return end
+    UIManager:nextTick(function()
+        local ok, err = pcall(function() return plugin:act("timer", nil, extra) end)
+        if not ok then logger.warn("ReadingOS: timer call failed:", err) end
+    end)
+end
+
+--- `user` = ZATRZYMAJ or a new START replacing it: only then does Hooome hear
+--- of it, and only for a timer that has not run out. GOTOWE, OK and the
+--- natural end send nothing — the server ignores a stop after ends_at anyway.
+function Kitchen.timerStop(user)
     local tm = Kitchen.timer
     if not tm then return end
     Kitchen.timer = nil
     UIManager:unschedule(tm.cb)
     Kitchen.hold("timer", false)
+    if user and not tm.done and tm.timer_id then
+        Kitchen.timerSend(tm.plugin, { op = "stop", timer_id = tm.timer_id })
+    end
 end
 
-function Kitchen.timerStart(lo_s, hi_s, step)
-    Kitchen.timerStop()
+--- `plugin` and `meta` ({ label, recipe_id }) are what the server call needs;
+--- without a plugin the timer still runs on the Kindle alone.
+function Kitchen.timerStart(lo_s, hi_s, step, plugin, meta)
+    Kitchen.timerStop(true)
     lo_s = math.floor(tonumber(lo_s) or 0)
     if lo_s <= 0 then return end
     local tm = { lo_s = lo_s, hi_s = math.max(lo_s, math.floor(tonumber(hi_s) or lo_s)), step = step,
-        ends_at = os.time() + lo_s, key = (Kitchen.cook_state or {}).key }
+        ends_at = os.time() + lo_s, key = (Kitchen.cook_state or {}).key, plugin = plugin }
     tm.cb = function() Kitchen.timerFire(tm) end
     Kitchen.timer = tm
     Kitchen.hold("timer", true)
     UIManager:scheduleIn(lo_s, tm.cb)
+    if plugin then
+        tm.timer_id = os.time() .. "-" .. math.random(1000, 9999)
+        meta = meta or {}
+        Kitchen.timerSend(plugin, { op = "start", timer_id = tm.timer_id, seconds = lo_s,
+            label = meta.label, recipe_id = meta.recipe_id })
+    end
     return tm
 end
 
@@ -5575,9 +5617,14 @@ function View:cookTap(t)
         st.step = t.to
         track("kuchnia", "step", tostring(t.to))
     elseif t.kind == "timer_start" then
-        Kitchen.timerStart(t.lo_s, t.hi_s, t.step)
+        local cook = type((self.data or {}).cook) == "table" and self.data.cook or {}
+        local label = Kitchen.str(cook.title)
+        if label ~= "" and tonumber(t.step) then label = label .. " · krok " .. tostring(t.step) end
+        Kitchen.timerStart(t.lo_s, t.hi_s, t.step, self.plugin, { label = label ~= "" and label or nil, recipe_id = cook.id })
         track("kuchnia", "timer", tostring(t.lo_s))
-    elseif t.kind == "timer_stop" or t.kind == "timer_ok" then
+    elseif t.kind == "timer_stop" then
+        Kitchen.timerStop(true)
+    elseif t.kind == "timer_ok" then
         Kitchen.timerStop()
     elseif t.kind == "notes" then
         local items = {}
@@ -5753,6 +5800,118 @@ function View:pantryHeader(x0, y0, w, p)
     }, h
 end
 
+--- The q/loc/cat the list is asked with, as a query string; nil when nothing is set.
+function View:pantrySearchQuery()
+    local qs = Kitchen.query { { "q", self.pq }, { "loc", self.ploc }, { "cat", self.pcat } }
+    return qs ~= "" and qs or nil
+end
+
+--- The server's filters block (kept from the last answer that had one).
+function View:pantryFilters()
+    local d = self.data or {}
+    local p = type(d.pantry) == "table" and d.pantry or {}
+    local f = type(p.filters) == "table" and p.filters or (type(d.filters) == "table" and d.filters or nil)
+    if f then self.pfilters = f end
+    return self.pfilters or {}
+end
+
+--- Name of the chosen location (the server sends ids), for its chip.
+function View:pantryLocName()
+    for _i, l in ipairs(type(self:pantryFilters().locations) == "table" and self.pfilters.locations or {}) do
+        if tostring(l.id) == tostring(self.ploc) then return Kitchen.str(l.name) end
+    end
+    return tostring(self.ploc)
+end
+
+--- DZIAŁ ▾ · KATEGORIA ▾ · SZUKAJ, then a chip with ✕ per active filter.
+function View:pantrySearchRow(x0, y0, w)
+    local pad, gap, ch = px(14), px(6), px(44)
+    local h = ch + px(8)
+    local row = HorizontalGroup:new { align = "center" }
+    local x = x0 + pad
+    local function put(label, on, target)
+        local g = x > x0 + pad and gap or 0
+        local cw = Kitchen.btnW(label, 12, px(64)) + 2 * px(6)
+        local room = x0 + w - pad - x - g
+        if cw > room then -- a long chip is shortened (its text is cut), never lost: its ✕ must stay tappable
+            if room < px(64) then return false end
+            cw = room
+        end
+        if g > 0 then table.insert(row, HorizontalSpan:new { width = g }) end
+        table.insert(row, button(cw, ch, label, 12, on))
+        self:claim(x + g - math.floor(g / 2), y0, x + g + cw + math.floor(gap / 2), y0 + h, target)
+        x = x + g + cw
+        return true
+    end
+    put(_("DZIAŁ ▾"), self.ploc ~= nil, { kind = "ps_pick", which = "loc" })
+    put(_("KATEGORIA ▾"), self.pcat ~= nil, { kind = "ps_pick", which = "cat" })
+    put(_("SZUKAJ"), self.pq ~= nil, { kind = "ps_q" })
+    if self.ploc then put(self:pantryLocName() .. " ✕", false, { kind = "ps_clear", which = "loc" }) end
+    if self.pcat then put(tostring(self.pcat) .. " ✕", false, { kind = "ps_clear", which = "cat" }) end
+    if self.pq then put("„" .. self.pq .. "” ✕", false, { kind = "ps_clear", which = "q" }) end
+    if self.psearch_note then
+        table.insert(row, HorizontalSpan:new { width = px(12) })
+        table.insert(row, ktext(self.psearch_note, 12, false, math.max(1, x0 + w - pad - x - px(12))))
+    end
+    return VerticalGroup:new { align = "left", cell(w, ch, row, pad), VerticalSpan:new { width = px(8) } }, h
+end
+
+--- Set (or, with nil, clear) one filter and ask the server. Offline: the old
+--- list and the old filters stay, with a one-line note.
+function View:pantrySet(which, value)
+    local keep = { self.pq, self.ploc, self.pcat }
+    if which == "q" then self.pq = value
+    elseif which == "loc" then self.ploc = value
+    else self.pcat = value end
+    local data, offline = Kitchen.fetch(nil, self:pantrySearchQuery())
+    if data and not offline then
+        self.data, self.offline, self.fetched_at = data, false, os.time()
+        self.psearch_note, self.place, self.pantry_page = nil, nil, 1
+    else
+        self.pq, self.ploc, self.pcat = keep[1], keep[2], keep[3]
+        self.psearch_note = _("Brak połączenia — lista bez zmian.")
+    end
+    self:redraw()
+end
+
+--- DZIAŁ / KATEGORIA: a plain list, "wszystkie" on top.
+function View:pantryPick(which)
+    local f = self:pantryFilters()
+    local rows = which == "loc" and f.locations or f.categories
+    local items = { { text = which == "loc" and _("Wszystkie działy") or _("Wszystkie kategorie"), all = true } }
+    for _i, r in ipairs(type(rows) == "table" and rows or {}) do
+        local name = Kitchen.str(r.name)
+        if name ~= "" then
+            local n = tonumber(r.count)
+            items[#items + 1] = { text = n and (name .. " · " .. n) or name,
+                value = which == "loc" and r.id or name }
+        end
+    end
+    self.plugin:showList(which == "loc" and _("DZIAŁ") or _("KATEGORIA"), items, function(item, menu)
+        UIManager:close(menu)
+        self:pantrySet(which, (not item.all) and item.value or nil)
+    end)
+end
+
+function View:pantryAsk()
+    local InputDialog = require("ui/widget/inputdialog")
+    local dialog
+    dialog = InputDialog:new {
+        title = _("Szukaj w spiżarni"),
+        input = self.pq or "",
+        buttons = { {
+            { text = _("Anuluj"), id = "close", callback = function() UIManager:close(dialog) end },
+            { text = _("SZUKAJ"), is_enter_default = true, callback = function()
+                local q = (dialog:getInputText() or ""):gsub("^%s+", ""):gsub("%s+$", "")
+                UIManager:close(dialog)
+                self:pantrySet("q", q ~= "" and q or nil)
+            end },
+        } },
+    }
+    UIManager:show(dialog)
+    dialog:onShowKeyboard()
+end
+
 --- WSZYSTKO | LODÓWKA | SZAFKA | MROŻONE, as wide as their words.
 function View:pantryChips(x0, y0, w, p)
     local chips = { { label = _("WSZYSTKO") } }
@@ -5905,8 +6064,9 @@ function View:buildPantry(x0, w, H)
     end
     local strip, sh = self:nowStrip(x0, 0, w)
     local header, hh = self:pantryHeader(x0, sh, w, p)
-    local chips, chh = self:pantryChips(x0, sh + hh, w, p)
-    local top = sh + hh + chh
+    local find, fh = self:pantrySearchRow(x0, sh + hh, w)
+    local chips, chh = self:pantryChips(x0, sh + hh + fh, w, p)
+    local top = sh + hh + fh + chh
     local foot_h = px(58)
     local ch = H - top - 2 * px(3) - foot_h
     local y0 = top + px(3)
@@ -5925,8 +6085,9 @@ function View:buildPantry(x0, w, H)
     if not left then left, right = cb[skip + 1], cb[skip + 2] end
     local body
     if #ca + #cb == 0 then
-        body = cell(w, ch, ktext(self.place and _("Nic w tym miejscu.") or _("Spiżarnia jest pusta."), 18, true,
-            w - 2 * px(14)), 0, true)
+        local none = (self.pq or self.ploc or self.pcat) and _("Nic nie pasuje.")
+            or (self.place and _("Nic w tym miejscu.") or _("Spiżarnia jest pusta."))
+        body = cell(w, ch, ktext(none, 18, true, w - 2 * px(14)), 0, true)
     else
         body = HorizontalGroup:new { align = "top",
             self:pantryColumn(x0, y0, lw, ch, left, row_h),
@@ -5934,7 +6095,7 @@ function View:buildPantry(x0, w, H)
             self:pantryColumn(x0 + lw + px(3), y0, rw, ch, right, row_h),
         }
     end
-    return VerticalGroup:new { align = "left", strip, header, chips, hline(w, 3), body, hline(w, 3),
+    return VerticalGroup:new { align = "left", strip, header, find, chips, hline(w, 3), body, hline(w, 3),
         self:pantryFooter(x0, y0 + ch + px(3), w, foot_h, page, pages) }
 end
 
@@ -6306,6 +6467,15 @@ function View:pantryTap(t)
         self.place, self.pantry_page = t.place, 1
     elseif k == "p_page" then
         self.pantry_page = t.to
+    elseif k == "ps_pick" then
+        self:pantryPick(t.which)
+        return true
+    elseif k == "ps_q" then
+        self:pantryAsk()
+        return true
+    elseif k == "ps_clear" then
+        self:pantrySet(t.which, nil)
+        return true
     elseif k == "p_use" or k == "p_undo" or k == "p_shop" or k == "p_shop_undo" then
         self:pantryAct(t)
         return true
