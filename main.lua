@@ -69,7 +69,6 @@ local DEFAULTS = {
     readingos_ss_lab = false,        -- planes + ISS band under the tasks
     readingos_ss_light_off = true,   -- keep the frontlight dark across a redraw
     readingos_lock_minutes = 30,     -- on-demand lock screen auto-unlocks after
-    readingos_teraz_refresh_min = 15, -- TERAZ refetch + full redraw every N minutes (5/10/15/30/60)
     readingos_teraz_minutes = 0,     -- TERAZ auto-closes after N minutes; 0 = no limit
     readingos_ss_landscape = true,   -- three categories side by side need the width
     readingos_device_id = "",        -- generated once on first "Telefon" open, never regenerated
@@ -80,7 +79,6 @@ local DEFAULTS = {
     readingos_show_weather = false,       -- dashboard header + sleep-screen weather
     readingos_show_cover = false,         -- hero book cover from the cover browser's sqlite cache
     readingos_show_tasks_preview = false, -- ZADANIA rows on the dashboard (card stays a target)
-    readingos_live_refresh = false,       -- GET /rev every 60 s while the dashboard is on top
     readingos_update_on_open = false,     -- daily manifest check when the dashboard opens
     readingos_telemetry = false,          -- usage log (file write per tap + upload)
     readingos_battery_log = false,        -- battery samples for the USTAWIENIA drain line
@@ -958,69 +956,55 @@ function Dashboard:init()
         self.key_events = { Close = { { Device.input.group.Back } } }
     end
     self[1] = self:build()
-    self:scheduleRevPoll()
+    self:scheduleAuto()
 end
 
--- Live refresh: while the dashboard is on screen, ask the server once a
--- minute whether anything changed (a ~40-byte cursor, not the dashboard)
--- and rebuild only when it did — so a task ticked off on the phone or via
--- Telegram shows up here within a minute, with no e-ink redraw otherwise.
--- Skipped when the radio is down (request() blocks for its socket timeout
--- and would freeze the UI), and when another ReadingOS screen sits on top
--- (a rebuild under it would swap the hit map out from under the user).
--- The first cursor the poll sees becomes the baseline, so the first poll
--- can never fire a rebuild on unchanged data.
--- Asleep, the poll stays quiet. UIManager schedules on CLOCK_MONOTONIC,
--- which does not tick in suspend, so every wake finds this task overdue and
--- runs it immediately — including the 15-minute RTC bounce that redraws the
--- sleep screen (rtcRefreshCallback → toggleSuspend → onResume, which clears
--- `simulated_wakeup` and goes straight back down). Fetching there would cost
--- a radio round trip and a full e-ink redraw on a device about to sleep
--- again, every quarter of an hour, for as long as the dashboard was left
--- open. `Device.screen_saver_mode` (set by patchScreensaver) and the
--- plugin's own `simulated_wakeup` are the two states that say so; a skipped
--- tick consumes nothing and re-arms as usual, so the change is picked up on
--- the first genuinely awake poll.
-local REV_POLL_SECONDS = 60
+-- Timed refresh (Q211): the same one setting as KUCHNIA and TERAZ
+-- (Kitchen.cfg: SAMO SIĘ ODŚWIEŻA + CO ILE + the CISZA windows), planned by the
+-- same Quiet.next. Inside a quiet window nothing is fetched; the quiet start
+-- puts the light out and the quiet end brings it back (Kitchen.onEvent).
+-- Only the screen on top acts: while KUCHNIA/TERAZ/anything else covers the
+-- dashboard its tick just re-arms, so a quiet start is never acted on twice
+-- and a rebuild never swaps the hit map out from under the user. Also skipped
+-- when asleep (UIManager's clock does not tick in suspend, so every wake finds
+-- this task overdue — including the RTC bounce that redraws the sleep screen)
+-- and when the radio is down (request() would block for its socket timeout).
+-- A skipped tick consumes nothing and re-plans from the clock.
+function Dashboard:scheduleAuto()
+    if not self.auto_cb then
+        self.auto_cb = function() self:autoTick() end
+    end
+    UIManager:unschedule(self.auto_cb)
+    self.next_event = nil
+    if self.closed then return end
+    local ev = ReadingOS._Kitchen.plan(os.time())
+    self.next_event = ev
+    if ev then UIManager:scheduleIn(math.max(1, ev.at - os.time()), self.auto_cb) end
+end
 
-function Dashboard:scheduleRevPoll()
-    if self.rev_poll or not get("readingos_live_refresh") then return end
-    self.rev_poll = function()
-        self.rev_poll_pending = false
-        if self.closed then return end
-        local asleep = Device.screen_saver_mode or self.plugin.simulated_wakeup
-        local ok, connected = pcall(function() return NetworkMgr:isConnected() end)
-        if not asleep and ok and connected and UIManager:getTopmostVisibleWidget() == self then
-            local ok_rev, rev = pcall(function() return self.plugin:fetchRev() end)
-            rev = ok_rev and rev or nil
-            if rev and self.rev == nil then
-                self.rev = rev
-            elseif rev and rev ~= self.rev then
-                self.rev = rev
-                track("home", "live_refresh")
+function Dashboard:autoTick()
+    if self.closed then return end
+    local ev, now = self.next_event, os.time()
+    if ev and now < ev.at then -- the timer runs on its own clock; a second early is not yet
+        return UIManager:scheduleIn(ev.at - now, self.auto_cb)
+    end
+    local asleep = Device.screen_saver_mode or self.plugin.simulated_wakeup
+    if ev and not asleep and UIManager:getTopmostVisibleWidget() == self then
+        local K = ReadingOS._Kitchen
+        if K.onEvent(self.plugin, ev, K.cfg()) then
+            local ok, connected = pcall(function() return NetworkMgr:isConnected() end)
+            if ok and connected then
+                track("home", "auto_refresh")
                 self.plugin:refreshInto(self)
             end
         end
-        if not self.closed then
-            self.rev_poll_pending = true
-            UIManager:scheduleIn(REV_POLL_SECONDS, self.rev_poll)
-        end
     end
-    -- No baseline request at open: the first poll a minute later takes the
-    -- first cursor it sees as the baseline (see the nil-check above), so a
-    -- change lands one poll later than it could and opening the dashboard
-    -- stays a single round trip.
-    self.rev = nil
-    self.rev_poll_pending = true
-    UIManager:scheduleIn(REV_POLL_SECONDS, self.rev_poll)
+    self:scheduleAuto()
 end
 
-function Dashboard:cancelRevPoll()
+function Dashboard:cancelAuto()
     self.closed = true
-    if self.rev_poll and self.rev_poll_pending then
-        UIManager:unschedule(self.rev_poll)
-        self.rev_poll_pending = false
-    end
+    if self.auto_cb then UIManager:unschedule(self.auto_cb) end
 end
 
 --- Register a tap target covering the next `height` pixels.
@@ -1647,7 +1631,7 @@ function Dashboard:onCharging() self:rebuildForCharging(true) end
 function Dashboard:onNotCharging() self:rebuildForCharging(false) end
 
 function Dashboard:onCloseWidget()
-    self:cancelRevPoll()
+    self:cancelAuto()
     UIManager:setDirty(nil, "full")
 end
 
@@ -4323,6 +4307,26 @@ function Kitchen.cfg()
         windows = Quiet.clean(q == nil and Quiet.DEFAULT or q),
         light_on = get("readingos_kitchen_quiet_light") == true, -- default WYŁ: dark in quiet
     }
+end
+
+--- The one planner for every screen that refreshes by itself (Q211): the next
+--- { at, kind } from the shared settings, and what to do when it is due.
+function Kitchen.plan(now)
+    local cfg = Kitchen.cfg()
+    return Quiet.next(now, cfg.auto, cfg.every, cfg.windows)
+end
+
+--- A due event on home or TERAZ (KUCHNIA has its own View:quietEvent): the
+--- light follows the quiet window (Q80/Q83/Q85, same functions as KUCHNIA).
+--- Returns true when the screen should refetch now.
+function Kitchen.onEvent(plugin, ev, cfg)
+    if ev.kind == "quiet_start" then
+        if not cfg.light_on then Kitchen.lightOff(plugin) end
+        return cfg.auto -- Q84: quiet starts with one last fetch
+    elseif ev.kind == "quiet_end" then
+        Kitchen.lightBack(plugin)
+    end
+    return true
 end
 
 --- The header's state, one wording for E1/E3/E4/D1 (mockup D2):
@@ -9400,8 +9404,8 @@ function LockView:lowBattery()
     return cap < (tonumber(get("readingos_ss_min_battery")) or 20)
 end
 
---- One minute: auto-close, battery guard, and every N minutes a refetch with
---- a full e-ink refresh (clears ghosting; "ui" is for taps).
+--- One minute: auto-close, battery guard, and on the shared refresh schedule a
+--- refetch with a full e-ink refresh (clears ghosting; "ui" is for taps).
 function LockView:terazTick()
     if self.until_ts and os.time() >= self.until_ts then
         self:onClose()
@@ -9412,9 +9416,14 @@ function LockView:terazTick()
         UIManager:show(InfoMessage:new { text = _("Słaba bateria — TERAZ wyłączony") })
         return
     end
-    self.ticks = self.ticks + 1
-    local every = math.max(1, tonumber(get("readingos_teraz_refresh_min")) or 15)
-    if self.ticks % every == 0 then self:terazRefresh("full") end
+    -- Same planner and settings as home and KUCHNIA (Q211); checked once a minute.
+    local K = ReadingOS._Kitchen
+    local ev = self.next_event or K.plan(os.time())
+    if ev and os.time() >= ev.at then
+        if K.onEvent(self.plugin, ev, K.cfg()) then self:terazRefresh("full") end
+        ev = K.plan(os.time())
+    end
+    self.next_event = ev
     UIManager:scheduleIn(60, self.tick)
 end
 
@@ -9843,6 +9852,13 @@ function ReadingOS:scheduleScreensaverRefresh()
     end
     local interval = tonumber(get("readingos_ss_refresh_rtc")) or 0
     if interval <= 0 or not self.wakeup_mgr then return end
+    -- CISZA (Q210): a wake that would land inside a quiet window waits for its end.
+    local K, now = ReadingOS._Kitchen, os.time()
+    local qs, qe = K.Quiet.span(K.cfg().windows, now + interval)
+    if qs then
+        if not qe then return end -- quiet with no end in sight: no wake at all
+        interval = math.max(interval, qe - now)
+    end
 
     local min_batt = tonumber(get("readingos_ss_min_battery")) or 0
     if min_batt > 0 then
@@ -10131,22 +10147,6 @@ function ReadingOS:settingsItems()
             },
             {
                 text_func = function()
-                    return "TERAZ odświeża co: " ..
-                        (tonumber(get("readingos_teraz_refresh_min")) or 15) .. " min"
-                end,
-                keep_menu_open = true,
-                callback = function(touchmenu)
-                    local choices = { 5, 10, 15, 30, 60 }
-                    local cur, nxt = tonumber(get("readingos_teraz_refresh_min")) or 15, choices[1]
-                    for i, c in ipairs(choices) do
-                        if c == cur then nxt = choices[i % #choices + 1] end
-                    end
-                    set("readingos_teraz_refresh_min", nxt)
-                    if touchmenu then touchmenu:updateItems() end
-                end,
-            },
-            {
-                text_func = function()
                     local m = tonumber(get("readingos_teraz_minutes")) or 0
                     return "TERAZ wyłącza się po: " .. (m > 0 and (m .. " min") or "bez limitu")
                 end,
@@ -10179,7 +10179,6 @@ function ReadingOS:settingsItems()
             onOffItem("readingos_show_tasks_preview", "Podgląd ZADANIA"),
             onOffItem("readingos_show_counts", "Liczniki ZAKUPY/DOM"),
             onOffItem("readingos_show_header_info", "Wi-Fi/SSID/wersja w nagłówku"),
-            onOffItem("readingos_live_refresh", "Auto-odświeżanie pulpitu"),
             onOffItem("readingos_update_on_open", "Sprawdzanie aktualizacji przy otwarciu"),
             onOffItem("readingos_telemetry", "Telemetria"),
             onOffItem("readingos_battery_log", "Dziennik baterii", true),
@@ -10264,21 +10263,31 @@ function ReadingOS:init()
     if not self.wakeup_mgr then
         logger.info("ReadingOS: no WakeupMgr, sleep-screen refresh unavailable")
     end
-    self.rtcRefreshCallback = function()
-        if Device:isKobo() then
-            UIManager:scheduleIn(0, function()
-                local Screensaver = require("ui/screensaver")
-                if Device.screen_saver_mode
-                    and G_reader_settings:readSetting("screensaver_type") == SS_TYPE then
-                    Screensaver:show()
-                end
-            end)
-        else
-            -- Kindle: bounce out of suspend so the screensaver redraws, then
-            -- straight back down (see onResume).
-            toggleSuspend()
-            self.simulated_wakeup = true
-        end
+    self.rtcRefreshCallback = function() self:rtcWake() end
+end
+
+--- The RTC woke the device for the sleep screen. Inside a CISZA window it must
+--- not redraw (Q210); scheduleScreensaverRefresh already aims the wake at the
+--- quiet end, so this is the backstop for a window that moved after arming.
+function ReadingOS:rtcWake()
+    local K = ReadingOS._Kitchen
+    if K.Quiet.span(K.cfg().windows, os.time()) then
+        self.rtc_scheduled = false
+        return self:scheduleScreensaverRefresh()
+    end
+    if Device:isKobo() then
+        UIManager:scheduleIn(0, function()
+            local Screensaver = require("ui/screensaver")
+            if Device.screen_saver_mode
+                and G_reader_settings:readSetting("screensaver_type") == SS_TYPE then
+                Screensaver:show()
+            end
+        end)
+    else
+        -- Kindle: bounce out of suspend so the screensaver redraws, then
+        -- straight back down (see onResume).
+        toggleSuspend()
+        self.simulated_wakeup = true
     end
 end
 
