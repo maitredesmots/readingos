@@ -83,7 +83,6 @@ local DEFAULTS = {
     readingos_telemetry = false,          -- usage log (file write per tap + upload)
     readingos_battery_log = false,        -- battery samples for the USTAWIENIA drain line
     readingos_show_counts = false,        -- ZAKUPY / DOM badges in the nav
-    readingos_show_header_info = false,   -- Wi-Fi + SSID + version in the dashboard header
 }
 
 local CACHE_FILE = DataStorage:getDataDir() .. "/cache/readingos.json"
@@ -1141,127 +1140,88 @@ function Dashboard:build()
         if weather.stale then weather_text = weather_text .. " ·" end
     end
 
-    -- Wi-Fi: KOReader's own wifi icon, the SSID when connected (the word
-    -- "Wi-Fi" otherwise — off and disconnected read the same at a glance
-    -- here, on purpose; either way is "not connected") and a filled/empty
-    -- dot (●/○, already proven on this panel). Every call here is local
-    -- (sysfs read / getifaddrs / lipc to wifid), never a network round trip.
-    -- Deliberately NOT using NetworkMgr:isOnline(), which resolves an
-    -- external hostname with no Lua-side timeout: exactly the kind of thing
-    -- that could hang the whole dashboard on a bad network.
-    local header_info = get("readingos_show_header_info")
-    local ok_wifi_on, wifi_on = false, nil
-    if header_info then ok_wifi_on, wifi_on = pcall(function() return NetworkMgr:isWifiOn() end) end
-    local wifi_name, wifi_dot = "Wi-Fi", "○"
-    if not header_info then
-        wifi_name, wifi_dot = "", ""
-    elseif not ok_wifi_on then
-        wifi_name, wifi_dot = "—", ""
-    elseif wifi_on then
+    -- Offline: the Wi-Fi icon and nothing else. Online it is not drawn at all
+    -- (S4): what matters is how old the screen is, and that is "stan na".
+    -- Local calls only (never NetworkMgr:isOnline(), which resolves a hostname
+    -- with no Lua-side timeout).
+    local ok_wifi_on, wifi_on = pcall(function() return NetworkMgr:isWifiOn() end)
+    local wifi_off = not (ok_wifi_on and wifi_on)
+    if not wifi_off then
         local ok_conn, connected = pcall(function() return NetworkMgr:isConnected() end)
-        if not ok_conn then
-            wifi_name, wifi_dot = "—", ""
-        elseif connected then
-            local ok_net, net = pcall(function() return NetworkMgr:getCurrentNetwork() end)
-            local ssid = (ok_net and type(net) == "table" and net.ssid and net.ssid ~= "") and net.ssid or nil
-            wifi_name, wifi_dot = ssid or "Wi-Fi", "●"
-        end
-    end
-
-    -- Version + update: what used to only live in the WIĘCEJ menu and the
-    -- separate AKTUALIZACJA banner (kept below, unchanged, for the actual
-    -- install action) — here it's just the glance answer to "am I current".
-    -- ASCII ">" rather than "→": that arrow glyph already exists elsewhere in
-    -- this file but was never physically confirmed on PW3 (TODO.md flags it
-    -- UNKNOWN) — this line renders far more often than either of its other
-    -- two spots, so it doesn't get to be the one that finds out.
-    local ok_ver, local_version = pcall(function() return self.plugin:localVersion() end)
-    local version_text = "v" .. (ok_ver and local_version or "?")
-    if self.plugin.update_ready then
-        version_text = version_text .. " > v" .. tostring(self.plugin.update_ready)
+        wifi_off = ok_conn and not connected
     end
 
     local ok_batt, capacity = pcall(function() return Device:getPowerDevice():getCapacity() end)
     local has_batt = ok_batt and type(capacity) == "number"
     local ok_chg, charging = pcall(function() return Device:getPowerDevice():isCharging() end)
-    self.drawn_charging = (ok_chg and charging) and true or false -- onCharging compares against it
-    -- ⚡ already renders on the PW3 (sleep-screen header); only while plugged in.
-    local batt_text = has_batt and ((ok_chg and charging) and ("\u{26A1}" .. capacity .. "%") or (capacity .. "%")) or "—"
+    charging = ok_chg and charging and true or false
+    self.drawn_charging = charging -- onCharging compares against it
+    -- Battery only when it matters: 20 % or less, or on the cable (⚡ already
+    -- renders on the PW3 sleep-screen header).
+    local show_batt = has_batt and (charging or capacity <= 20)
+    local batt_text = has_batt and (charging and ("\u{26A1}" .. capacity .. "%") or (capacity .. "%")) or "—"
 
-    -- Fixed segments are measured first and reserve their own width; the
-    -- Wi-Fi segment gets whatever is left and truncates the SSID inside it.
-    -- So a long SSID (or "v2.2.5 > v2.2.6") can shorten only the SSID —
-    -- never push version or battery off the right edge. And if even that
-    -- leaves the SSID no room (a very long update string on a narrow
-    -- screen), the glance-only segments give way first — weather, then the
-    -- date — so the strip itself is always exactly cw wide.
+    -- "stan na HH:MM ›": KUCHNIA's own wording (Kitchen.status) with the time of
+    -- the data on screen; a tap opens the one settings screen.
+    local shown_at = self.age and (os.time() - self.age) or self.fetched_at or self.opened_at
+    local status_text = ReadingOS._Kitchen.status({ offline = self.age ~= nil, next_event = self.next_event }, shown_at) .. " ›"
+
     local hdr_h = Screen:scaleBySize(40)
     local seg_pad = Screen:scaleBySize(9)
     local hdr_ico = Screen:scaleBySize(20)
     local hdr_gap = Screen:scaleBySize(6)
     local f_hdr = dashFace(SIZE_META)
-    local batt_widget = HorizontalGroup:new { text(batt_text, f_hdr) }
-    if has_batt then
-        table.insert(batt_widget, HorizontalSpan:new { width = hdr_gap })
-        table.insert(batt_widget, batteryIcon(math.max(0, math.min(capacity, 100)) / 100, Screen:scaleBySize(11)))
-    end
-    local wifi_min = header_info and (Screen:scaleBySize(20) -- the SSID's own minimum
-        + 2 * seg_pad + hdr_ico + 2 * hdr_gap + size(text(wifi_dot, f_hdr)).w) or 0
     local segs = {
         { widget = text(os.date("%H:%M"), dashFace(SIZE_TITLE), { bold = true }) },
         { widget = text(plDate(), f_hdr), optional = 2 },
     }
     if weather_text ~= "" then segs[#segs + 1] = { widget = text(weather_text, f_hdr), optional = 1 } end
     segs[#segs + 1] = { flex = true }
-    if header_info then segs[#segs + 1] = { widget = text(version_text, f_hdr), version = true } end
-    segs[#segs + 1] = { widget = batt_widget }
-    for _i, s in ipairs(segs) do
-        if not s.flex then s.w = size(s.widget).w + 2 * seg_pad end
+    if wifi_off then segs[#segs + 1] = { widget = icon("wifi", hdr_ico) } end
+    if show_batt then
+        local batt_widget = HorizontalGroup:new { text(batt_text, f_hdr) }
+        table.insert(batt_widget, HorizontalSpan:new { width = hdr_gap })
+        table.insert(batt_widget, batteryIcon(math.max(0, math.min(capacity, 100)) / 100, Screen:scaleBySize(11)))
+        segs[#segs + 1] = { widget = batt_widget }
+    end
+    for _i, sg in ipairs(segs) do
+        if not sg.flex then sg.w = size(sg.widget).w + 2 * seg_pad end
     end
     local hdr_inner = cw - 2 * bord
     local function usedWidth()
         local used = (#segs - 1) * bord
-        for _i, s in ipairs(segs) do used = used + (s.w or 0) end
+        for _i, sg in ipairs(segs) do used = used + (sg.w or 0) end
         return used
     end
+    -- the status gets at least a third of the strip; weather, then the date, give way first
+    local status_min = math.floor(cw / 3)
     for drop = 1, 2 do
-        if hdr_inner - usedWidth() >= wifi_min then break end
-        for i, s in ipairs(segs) do
-            if s.optional == drop then table.remove(segs, i); break end
+        if hdr_inner - usedWidth() >= status_min then break end
+        for i, sg in ipairs(segs) do
+            if sg.optional == drop then table.remove(segs, i); break end
         end
     end
-    local wifi_w = math.max(wifi_min, hdr_inner - usedWidth())
-    local ssid_room = wifi_w - 2 * seg_pad - hdr_ico - 2 * hdr_gap - size(text(wifi_dot, f_hdr)).w
-    -- Header info off: the flex segment stays as empty space, so clock and
-    -- battery keep their places at both ends.
-    local wifi_widget = header_info and HorizontalGroup:new {
-        icon("wifi", hdr_ico),
-        HorizontalSpan:new { width = hdr_gap },
-        text(wifi_name, f_hdr, { max_width = ssid_room }),
-        HorizontalSpan:new { width = hdr_gap },
-        text(wifi_dot, f_hdr),
-    } or HorizontalSpan:new { width = 0 }
-    -- The version segment is a target (leo, 2026-09-24): a tap runs the same
-    -- check as WIĘCEJ → SPRAWDŹ AKTUALIZACJE — "Wszystko aktualne (vX)" or
-    -- the install offer. The rest of the strip stays a glance.
+    local flex_w = math.max(status_min, hdr_inner - usedWidth())
     local header = HorizontalGroup:new {}
-    local seg_x, version_x1, version_x2 = pad + bord, nil, nil
-    for i, s in ipairs(segs) do
+    local seg_x, status_x1, status_x2 = pad + bord, nil, nil
+    for i, sg in ipairs(segs) do
         if i > 1 then
             table.insert(header, vline(hdr_h))
             seg_x = seg_x + bord
         end
-        local w = s.flex and wifi_w or s.w
+        local w = sg.flex and flex_w or sg.w
+        local inner_w = sg.flex and (w - 2 * seg_pad) or nil
         table.insert(header, CenterContainer:new {
-            dimen = Geom:new { w = w, h = hdr_h }, s.flex and wifi_widget or s.widget })
-        if s.version then version_x1, version_x2 = seg_x, seg_x + w end
+            dimen = Geom:new { w = w, h = hdr_h },
+            sg.flex and text(status_text, f_hdr, { max_width = inner_w }) or sg.widget })
+        if sg.flex then status_x1, status_x2 = seg_x, seg_x + w end
         seg_x = seg_x + w
     end
     local hdr_top = y
     add(FrameContainer:new { bordersize = bord, padding = 0, width = cw, radius = 0, header }, hdr_h)
-    if version_x1 then
-        self.hit[#self.hit + 1] = { kind = "update", label = "version",
-            x1 = version_x1, x2 = version_x2, y1 = hdr_top, y2 = y }
+    if status_x1 then
+        self.hit[#self.hit + 1] = { kind = "settings", label = "status",
+            x1 = status_x1, x2 = status_x2, y1 = hdr_top, y2 = y }
     end
     gap(8)
 
@@ -1299,7 +1259,10 @@ function Dashboard:build()
     -- than on a phone, so the way back is a visible row, not a hidden gesture.
     local act = self.plugin.liveAct and self.plugin:liveAct()
     local foot_h = act and (h_row + Screen:scaleBySize(6)) or 0
-    local limit = H - pad - nav_rule - nav_h - foot_h
+    -- the A±/☼ row sits between the undo footer and the nav (S4)
+    local ctl_h = MIN_TAP
+    local ctl_gap = Screen:scaleBySize(6)
+    local limit = H - pad - nav_rule - nav_h - foot_h - ctl_h - ctl_gap
     UIManager:unschedule(self.undo_cb)
     if act and not self.closed then
         self.undo_cb = self.undo_cb or function() self:rebuildForUndo() end
@@ -1363,18 +1326,10 @@ function Dashboard:build()
         return g
     end
 
-    -- ---- CO CZYTAM + the light switch beside it (leo, 2026-09-24): its own
-    -- box outside the book card, exactly as tall as the card. The card is
-    -- given a floor of two fingertip buttons plus the level line, so when the
-    -- book is short it is the card that grows — never the buttons that shrink.
-    -- A device without a front light gets the full-width card and no box.
-    local light = self.plugin:lightLevel()
-    local light_w = light and Screen:scaleBySize(44) or 0
-    local light_gap = light and Screen:scaleBySize(8) or 0
-    local book_cw = cw - light_w - light_gap
+    -- ---- CO CZYTAM: the full width (the light switch moved to the A±/☼ row
+    -- above the nav, S4).
+    local book_cw = cw
     local book_iw = book_cw - 2 * (bord + card_pad)
-    local light_mid = h_meta
-    local light_min = light and (2 * MIN_TAP + light_mid + 4 * bord) or 0
     do
         local bw = book_iw - lead_w - chev_col
         local content = VerticalGroup:new { align = "left",
@@ -1399,7 +1354,7 @@ function Dashboard:build()
             VerticalSpan:new { width = Screen:scaleBySize(2) },
             content,
         }
-        local body_h = math.max(size(lead).h, size(body).h, light_min - 2 * (bord + card_pad))
+        local body_h = math.max(size(lead).h, size(body).h)
         local inner = OverlapGroup:new { dimen = Geom:new { w = book_iw, h = body_h } }
         table.insert(inner, LeftContainer:new { dimen = Geom:new { w = book_iw, h = body_h },
             HorizontalGroup:new {
@@ -1412,48 +1367,6 @@ function Dashboard:build()
         local book_h = size(book_frame).h
         local top = y
         local book_row = HorizontalGroup:new { align = "top", book_frame }
-        if light then
-            local lw_in = light_w - 2 * bord
-            local btn_h = math.floor((book_h - 2 * bord - light_mid - 2 * bord) / 2)
-            local btn2_h = book_h - 2 * bord - light_mid - 2 * bord - btn_h
-            local light_max = self.plugin:lightMax()
-            -- Q101: + greys at the top, − at 0, the way A−/A+ do at their ends
-            local function lightButton(sign, h, off)
-                local t = text(sign, dashFace(SIZE_TITLE), { bold = true })
-                t.fgcolor = off and Blitbuffer.COLOR_GRAY_9 or Blitbuffer.COLOR_BLACK
-                return CenterContainer:new { dimen = Geom:new { w = lw_in, h = h }, t }, t
-            end
-            local up_cell, down_cell
-            up_cell, self.light_up = lightButton("+", btn_h, light_max and light >= light_max)
-            down_cell, self.light_down = lightButton("−", btn2_h, light <= 0)
-            -- Kept on the widget: a tap swaps the sun and the number and
-            -- refreshes the box alone, so stepping never flashes the panel.
-            local label, sun = lightLabel(light, "sun", light_max)
-            self.light_text = text(label, dashFace(SIZE_META), { bold = true })
-            self.light_icon = sun
-            self.light_group = HorizontalGroup:new { align = "center",
-                icon(sun, Screen:scaleBySize(12)),
-                HorizontalSpan:new { width = light > 0 and Screen:scaleBySize(2) or 0 },
-                self.light_text,
-            }
-            local light_frame = FrameContainer:new { bordersize = bord, padding = 0, radius = 0,
-                VerticalGroup:new { align = "center",
-                    up_cell,
-                    hline(lw_in),
-                    CenterContainer:new { dimen = Geom:new { w = lw_in, h = light_mid }, self.light_group },
-                    hline(lw_in),
-                    down_cell,
-                } }
-            table.insert(book_row, HorizontalSpan:new { width = light_gap })
-            table.insert(book_row, light_frame)
-            local lx1, lx2 = pad + book_cw + light_gap, pad + cw
-            self.light_region = Geom:new { x = lx1, y = top, w = light_w, h = book_h }
-            self.hit[#self.hit + 1] = { kind = "light", delta = LIGHT_STEP, label = "light_up",
-                x1 = lx1, x2 = lx2, y1 = top + bord, y2 = top + bord + btn_h }
-            local down_y = top + bord + btn_h + bord + light_mid + bord
-            self.hit[#self.hit + 1] = { kind = "light", delta = -LIGHT_STEP, label = "light_down",
-                x1 = lx1, x2 = lx2, y1 = down_y, y2 = down_y + btn2_h }
-        end
         add(book_row, book_h)
         self.hit[#self.hit + 1] = { kind = "continue", label = "continue",
             x1 = pad, x2 = pad + book_cw, y1 = top, y2 = top + book_h }
@@ -1557,13 +1470,64 @@ function Dashboard:build()
                 h_row, { kind = "undo", label = tostring(act.label) })
         end
     end
+    -- ---- A−  A+ | ☼−  level  ☼+ : text size (the shared readingos_kitchen_font,
+    -- same clamp and greying as the kitchen rail) and the front light (the same
+    -- stepLight handler, repainted in place).
+    do
+        gap(6)
+        local K = ReadingOS._Kitchen
+        local step = K.fontStep()
+        local light = self.plugin:lightLevel()
+        local light_max = light and self.plugin:lightMax()
+        local cells = {}
+        local function label(str, off, target)
+            local t = text(str, dashFace(SIZE_TITLE), { bold = true })
+            t.fgcolor = off and Blitbuffer.COLOR_GRAY_9 or Blitbuffer.COLOR_BLACK
+            cells[#cells + 1] = { widget = t, target = (not off) and target or nil, t = t }
+            return t
+        end
+        label("A−", step <= K.ZOOM_MIN, { kind = "zoom", delta = -1, label = "zoom_down" })
+        label("A+", step >= K.ZOOM_MAX, { kind = "zoom", delta = 1, label = "zoom_up" })
+        if light then
+            self.light_down = label("☼−", light <= 0, { kind = "light", delta = -LIGHT_STEP, label = "light_down" })
+            local lbl, sun = lightLabel(light, "sun", light_max)
+            self.light_text = text(lbl, dashFace(SIZE_META), { bold = true })
+            self.light_icon = sun
+            self.light_group = HorizontalGroup:new { align = "center",
+                icon(sun, Screen:scaleBySize(12)),
+                HorizontalSpan:new { width = light > 0 and Screen:scaleBySize(2) or 0 },
+                self.light_text,
+            }
+            cells[#cells + 1] = { widget = self.light_group }
+            self.light_up = label("☼+", light_max and light >= light_max, { kind = "light", delta = LIGHT_STEP, label = "light_up" })
+        end
+        local n = #cells
+        local inner = cw - 2 * bord - (n - 1) * bord
+        local row = HorizontalGroup:new {}
+        local cx, ctl_top = pad + bord, y
+        for i, c in ipairs(cells) do
+            local w = math.floor(inner / n) + (i <= inner % n and 1 or 0)
+            if i > 1 then
+                table.insert(row, vline(ctl_h - 2 * bord))
+                cx = cx + bord
+            end
+            table.insert(row, CenterContainer:new { dimen = Geom:new { w = w, h = ctl_h - 2 * bord }, c.widget })
+            if c.target then
+                c.target.x1, c.target.x2, c.target.y1, c.target.y2 = cx, cx + w, ctl_top, ctl_top + ctl_h
+                self.hit[#self.hit + 1] = c.target
+            end
+            cx = cx + w
+        end
+        self.light_region = Geom:new { x = pad, y = ctl_top, w = cw, h = ctl_h }
+        add(FrameContainer:new { bordersize = bord, padding = 0, margin = 0, width = cw, radius = 0, row }, ctl_h)
+    end
+
     add(rule(cw), nav_rule)
     local nav_items = {
-        { icon = "close", label = "ZAMKNIJ", target = { kind = "close", label = "close" } },
-        { icon = "fork", label = "JEDZENIE", count = show_counts and shopping.total or nil, target = { screen = "foood", label = "foood" } },
+        { icon = "k_tasks", label = "ZADANIA", target = { screen = "tasks", label = "tasks" } },
         { icon = "k_cook", label = "KUCHNIA", target = { screen = "kitchen", label = "kitchen" } },
+        { icon = "fork", label = "JEDZENIE", count = show_counts and shopping.total or nil, target = { screen = "foood", label = "foood" } },
         { icon = "yarn", label = "CRAFTSSS", target = { screen = "crafts", label = "crafts" } },
-        { icon = "home", label = "DOM", count = show_counts and out or nil, target = { screen = "house", label = "house" } },
         { icon = "more", label = "WIĘCEJ", target = { kind = "more", label = "more" } },
     }
     local seg_w = math.floor(cw / #nav_items)
@@ -2120,6 +2084,7 @@ function ReadingOS:refreshInto(dashboard)
     if not data then return false end
     dashboard.data = data
     dashboard.age = age
+    dashboard.fetched_at = os.time()
     dashboard.hit = {}
     -- Release the tree being replaced before dropping the reference: a
     -- rebuild is routine now (the live-refresh poll), and each one allocates
@@ -3166,6 +3131,24 @@ function ReadingOS:handle(dashboard, target, is_hold)
         return self:checkForUpdate(false)
     end
 
+    -- header "stan na HH:MM ›": the one settings screen, in the current orientation
+    if target.kind == "settings" then
+        track("home", "settings")
+        return self:openSettings()
+    end
+
+    -- A− / A+: the shared text size (readingos_kitchen_font), same clamp as the rail
+    if target.kind == "zoom" then
+        local K = self._Kitchen or ReadingOS._Kitchen
+        local n = math.max(K.ZOOM_MIN, math.min(K.ZOOM_MAX, K.fontStep() + target.delta))
+        if n ~= K.fontStep() then
+            set("readingos_kitchen_font", n)
+            track("home", "font", tostring(n))
+            dashboard:rebuildForUndo()
+        end
+        return
+    end
+
     if target.kind == "undo" then
         track("home", "undo", target.label)
         self:receipt(_("Cofam…"))
@@ -3241,6 +3224,7 @@ function ReadingOS:openMore(dashboard, start_tab)
         if dashboard then
             tabs[#tabs + 1] = {
                 text = _("Działania"), icon = "appbar.tools",
+                item(_("Zamknij ReadingOS"), function() dashboard:onClose() end),
                 item("ODŚWIEŻ", function() self:refreshNow(dashboard) end),
                 item("TELEFON", function() self:showPhone() end),
                 item("TERAZ", function() self:showTeraz() end),
@@ -9168,12 +9152,16 @@ function ReadingOS:ssWidget(d, stale, lock_label, opts)
     local head_w = 0
     for _, it in ipairs(head) do head_w = head_w + it:getSize().w end
     local head_right = batt_w
-    local x_w = 0
+    local x_w, status_w = 0, 0
     if teraz then
         -- The one close control every ReadingOS screen shares, top right.
         local x_icon = icon("close", dh)
         x_w = x_icon:getSize().w
-        head_right = HorizontalGroup:new { align = "center", batt_w, hspan(14), x_icon }
+        -- "stan na HH:MM ›" (S4): opens the one settings screen
+        local at = opts.status_at or os.time()
+        local status = ssText("stan na " .. ReadingOS._Kitchen.clock(at) .. " ›", f_head)
+        status_w = status:getSize().w + hspan(14):getSize().w
+        head_right = HorizontalGroup:new { align = "center", status, hspan(14), batt_w, hspan(14), x_icon }
     end
     local room = cw - head_right:getSize().w - Screen:scaleBySize(16)
     local weather = get("readingos_show_weather") and type(d) == "table" and type(d.weather) == "table" and d.weather or nil
@@ -9202,6 +9190,12 @@ function ReadingOS:ssWidget(d, stale, lock_label, opts)
         hits[#hits + 1] = {
             kind = "close",
             x1 = W - (pad + box) - x_w - Screen:scaleBySize(36), x2 = W,
+            y1 = 0, y2 = pad + box + head_row_h + Screen:scaleBySize(14),
+        }
+        local sx2 = W - (pad + box) - x_w - Screen:scaleBySize(36)
+        hits[#hits + 1] = {
+            kind = "settings",
+            x1 = W - (pad + box) - head_right:getSize().w - Screen:scaleBySize(8), x2 = sx2,
             y1 = 0, y2 = pad + box + head_row_h + Screen:scaleBySize(14),
         }
     end
@@ -9582,6 +9576,7 @@ function LockView:build()
         self.hits = {}
         return self.plugin:ssWidget(self.data, self.stale, nil, {
             teraz = true, hits = self.hits, strip = self.plugin:terazStrip(self.hist, self.last),
+            status_at = self.fetched_at or self.opened_at,
         })
     end
     return self.plugin:ssWidget(self.data, self.stale, "\u{1F512}  ODBLOKUJ")
@@ -9745,7 +9740,7 @@ end
 --- Refetch the card payload and the history, battery sample, redraw.
 function LockView:terazRefresh(mode)
     local data, stale = self.plugin:ssFetch()
-    if data then self.data, self.stale = data, stale end
+    if data then self.data, self.stale = data, stale; if not stale then self.fetched_at = os.time() end end
     self.hist = self.plugin:fetchHistory()
     battSample("awake")
     self:redraw(mode)
@@ -9790,6 +9785,11 @@ function LockView:terazTap(x, y)
     local t = terazHit(self.hits, x, y)
     if not t then return true end
     if t.kind == "close" then return self:onClose() end
+    if t.kind == "settings" then
+        track("teraz", "settings")
+        self.plugin:openSettings()
+        return true
+    end
     self.busy = true
     if t.kind == "task" then
         track("teraz", "done", tostring(t.id))
@@ -10492,7 +10492,6 @@ function ReadingOS:settingsItems()
                 separator = true,
             },
             onOffItem("readingos_show_tasks_preview", "Podgląd ZADANIA"),
-            onOffItem("readingos_show_header_info", "Wi-Fi/SSID/wersja w nagłówku"),
             onOffItem("readingos_update_on_open", "Sprawdzanie aktualizacji przy otwarciu"),
             onOffItem("readingos_telemetry", "Telemetria"),
             onOffItem("readingos_battery_log", "Dziennik baterii", true),
