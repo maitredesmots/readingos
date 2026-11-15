@@ -854,6 +854,10 @@ local ICON_SVG = {
     ["drop"] = [[<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48"><g fill="none" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M24 5C17 16 12 23 12 30a12 12 0 0 0 24 0c0-7-5-14-12-25z"/></g></svg>]],
     ["wind"] = [[<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48"><g fill="none" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M4 18h26a6 6 0 1 0-6-6"/><path d="M4 26h34a6 6 0 1 1-6 6"/><path d="M4 34h16"/></g></svg>]],
 }
+-- Q100: the dashboard's light box — a dim sun (short rays) and the light off
+-- (crossed out, white gap around the slash like Phosphor's *Slash icons).
+ICON_SVG.sun_dim = [[<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48"><g fill="none" stroke="#000000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><circle cx="24" cy="24" r="9"/><path d="M24 7v2M24 39v2M7 24h2M39 24h2M12 12l1 1M35 35l1 1M12 36l1-1M35 13l1-1"/></g></svg>]]
+ICON_SVG.sun_off = ICON_SVG.sun:gsub("</svg>$", [[<path d="M7 7l34 34" stroke="#FFFFFF" stroke-width="9" stroke-linecap="round"/><path d="M7 7l34 34" stroke="#000000" stroke-width="3" stroke-linecap="round"/></svg>]])
 local ICON_DIR = DataStorage:getDataDir() .. "/cache/readingos-icons"
 
 --- Path of the cached SVG for an inline icon, written on first use (or when
@@ -907,9 +911,15 @@ local function batteryIcon(fraction, h)
 end
 
 -- Front light: PW3 has 25 levels (0–24), so one tap moves two — twelve taps
--- end to end, and 0 reads "wył" the way the light actually is.
+-- end to end. Q100 (2.16.3): the sun says where the light is — crossed out at
+-- 0 (no number), a dim sun up to a third of the range, the full sun above.
 local LIGHT_STEP = 2
-local function lightLabel(level) return level == 0 and "wył" or tostring(level) end
+--- The level's number ("" when off) and its sun: `base` is "sun" on the
+--- dashboard, "k_sun" in KUCHNIA; `max` is the hardware's top level.
+local function lightLabel(level, base, max)
+    if level <= 0 then return "", base .. "_off" end
+    return tostring(level), level * 3 <= (max or 24) and (base .. "_dim") or base
+end
 
 -- Most task rows the dashboard previews; the server sends the same number
 -- (PREVIEW_ROWS in hooome), and the layout drops rows until the card fits.
@@ -1405,25 +1415,33 @@ function Dashboard:build()
             local lw_in = light_w - 2 * bord
             local btn_h = math.floor((book_h - 2 * bord - light_mid - 2 * bord) / 2)
             local btn2_h = book_h - 2 * bord - light_mid - 2 * bord - btn_h
-            local function lightButton(sign, h)
-                return CenterContainer:new { dimen = Geom:new { w = lw_in, h = h },
-                    text(sign, dashFace(SIZE_TITLE), { bold = true }) }
+            local light_max = self.plugin:lightMax()
+            -- Q101: + greys at the top, − at 0, the way A−/A+ do at their ends
+            local function lightButton(sign, h, off)
+                local t = text(sign, dashFace(SIZE_TITLE), { bold = true })
+                t.fgcolor = off and Blitbuffer.COLOR_GRAY_9 or Blitbuffer.COLOR_BLACK
+                return CenterContainer:new { dimen = Geom:new { w = lw_in, h = h }, t }, t
             end
-            -- Kept on the widget: a tap swaps this one text and refreshes the
-            -- box alone, so stepping the light never flashes the whole panel.
-            self.light_text = text(lightLabel(light), dashFace(SIZE_META), { bold = true })
+            local up_cell, down_cell
+            up_cell, self.light_up = lightButton("+", btn_h, light_max and light >= light_max)
+            down_cell, self.light_down = lightButton("−", btn2_h, light <= 0)
+            -- Kept on the widget: a tap swaps the sun and the number and
+            -- refreshes the box alone, so stepping never flashes the panel.
+            local label, sun = lightLabel(light, "sun", light_max)
+            self.light_text = text(label, dashFace(SIZE_META), { bold = true })
+            self.light_icon = sun
             self.light_group = HorizontalGroup:new { align = "center",
-                icon("sun", Screen:scaleBySize(12)),
-                HorizontalSpan:new { width = Screen:scaleBySize(2) },
+                icon(sun, Screen:scaleBySize(light > 0 and 12 or 16)),
+                HorizontalSpan:new { width = light > 0 and Screen:scaleBySize(2) or 0 },
                 self.light_text,
             }
             local light_frame = FrameContainer:new { bordersize = bord, padding = 0, radius = 0,
                 VerticalGroup:new { align = "center",
-                    lightButton("+", btn_h),
+                    up_cell,
                     hline(lw_in),
                     CenterContainer:new { dimen = Geom:new { w = lw_in, h = light_mid }, self.light_group },
                     hline(lw_in),
-                    lightButton("−", btn2_h),
+                    down_cell,
                 } }
             table.insert(book_row, HorizontalSpan:new { width = light_gap })
             table.insert(book_row, light_frame)
@@ -2005,6 +2023,12 @@ function ReadingOS:lightLevel()
         return Device:getPowerDevice():frontlightIntensity()
     end)
     return ok and tonumber(level) or nil
+end
+
+--- Top front light level (24 on the PW3), nil when it cannot be read.
+function ReadingOS:lightMax()
+    local ok, max = pcall(function() return Device:getPowerDevice().fl_max end)
+    return ok and tonumber(max) or nil
 end
 
 --- Step the front light by `delta`, the way KOReader's own FrontLightWidget
@@ -3096,9 +3120,21 @@ function ReadingOS:handle(dashboard, target, is_hold)
     if target.kind == "light" then
         local level = self:stepLight(target.delta)
         if level and dashboard.light_text then
-            dashboard.light_text:setText(lightLabel(level))
-            -- the group caches its width; "wył" and "12" differ
-            if dashboard.light_group.resetLayout then dashboard.light_group:resetLayout() end
+            local max = self:lightMax()
+            local label, sun = lightLabel(level, "sun", max)
+            dashboard.light_text:setText(label)
+            local g = dashboard.light_group
+            if sun ~= dashboard.light_icon then
+                g[1] = icon(sun, Screen:scaleBySize(level > 0 and 12 or 16))
+                dashboard.light_icon = sun
+            end
+            g[2].width = level > 0 and Screen:scaleBySize(2) or 0
+            if dashboard.light_up then
+                dashboard.light_up.fgcolor = (max and level >= max) and Blitbuffer.COLOR_GRAY_9 or Blitbuffer.COLOR_BLACK
+                dashboard.light_down.fgcolor = level <= 0 and Blitbuffer.COLOR_GRAY_9 or Blitbuffer.COLOR_BLACK
+            end
+            -- the group caches its width; the sun and the number change size
+            if g.resetLayout then g:resetLayout() end
             UIManager:setDirty(dashboard, "ui", dashboard.light_region)
         end
         return
@@ -4556,7 +4592,7 @@ end
 function View:buildRail(w, H)
     local inner = w - px(3)
     local cells = { { icon = "k_home", target = { kind = "home" } } } -- Q93: back to the dashboard
-    self.light_text, self.light_region = nil, nil
+    self.light_text, self.light_region, self.light_cells = nil, nil, nil
     for i, r in ipairs(RAIL) do
         cells[#cells + 1] = { icon = r.icon, on = r.key == self.screen, rule = i == 1 and 3 or nil,
             target = { kind = "rail", key = r.key } }
@@ -4567,9 +4603,14 @@ function View:buildRail(w, H)
     cells[#cells + 1] = { label = "A+", off = step >= Kitchen.ZOOM_MAX, target = { kind = "zoom", delta = 1 } }
     local level = self.plugin.lightLevel and self.plugin:lightLevel()
     if level then -- no front light, no ☼ cells
-        cells[#cells + 1] = { icon = "k_sun", label = "−", rule = 3, target = { kind = "light", delta = -LIGHT_STEP } }
-        cells[#cells + 1] = { label = lightLabel(level), level = true } -- Q94: where the light is now
-        cells[#cells + 1] = { icon = "k_sun", label = "+", target = { kind = "light", delta = LIGHT_STEP } }
+        local max = self.plugin.lightMax and self.plugin:lightMax()
+        local label, sun = lightLabel(level, "k_sun", max)
+        -- Q101: ☼− greys at 0 and ☼+ at the top, like A−/A+
+        cells[#cells + 1] = { icon = "k_sun", label = "−", off = level <= 0, rule = 3, light = "down",
+            target = { kind = "light", delta = -LIGHT_STEP } }
+        cells[#cells + 1] = { icon = sun, label = label, level = true } -- Q94/Q100: where the light is now
+        cells[#cells + 1] = { icon = "k_sun", label = "+", off = max and level >= max or false, light = "up",
+            target = { kind = "light", delta = LIGHT_STEP } }
     end
     local col = VerticalGroup:new { align = "left" }
     local y = 0
@@ -4581,11 +4622,23 @@ function View:buildRail(w, H)
         if c.label then
             local text = TextWidget:new { text = c.label, face = kface(18, true), bold = true,
                 fgcolor = c.off and Blitbuffer.COLOR_GRAY_9 or Blitbuffer.COLOR_BLACK }
-            face = c.icon and HorizontalGroup:new { align = "center", icon(c.icon, px(22)),
-                HorizontalSpan:new { width = px(2) }, text } or text
+            local glyph = c.icon and ((c.off and c.icon == "k_sun") and "k_sun_g" or c.icon)
+            local gap = (c.level and c.label == "") and 0 or px(2)
+            face = c.icon and HorizontalGroup:new { align = "center",
+                icon(glyph, (c.level and c.label == "") and px(30) or px(22)),
+                HorizontalSpan:new { width = gap }, text } or text
+            if c.level or c.light then
+                -- Q100/Q101: a ☼ tap rebuilds just these three cells in place
+                self.light_cells = self.light_cells or {}
+                self.light_cells[c.light or "level"] = { group = face, text = text, icon = glyph }
+            end
             if c.level then
                 self.light_text = text
-                self.light_region = Geom:new { x = 0, y = y + line, w = inner, h = h - line }
+                self.light_icon = glyph
+            end
+            if c.light == "down" then self.light_top = y + line end
+            if c.light == "up" then
+                self.light_region = Geom:new { x = 0, y = self.light_top, w = inner, h = y + h - self.light_top }
             end
         else
             face = icon(c.on and (c.icon .. "_w") or c.icon, px(28))
@@ -4599,6 +4652,28 @@ function View:buildRail(w, H)
         y = y + h
     end
     return HorizontalGroup:new { align = "top", col, vline(H) }
+end
+
+--- Q100/Q101: after a ☼ tap — the sun and number in the middle cell, ☼− grey
+--- at 0, ☼+ grey at the top — then one repaint of those three cells.
+function View:paintLight(level)
+    local max = self.plugin.lightMax and self.plugin:lightMax()
+    local label, sun = lightLabel(level, "k_sun", max)
+    local cells = self.light_cells
+    local function set(c, glyph, size, text, grey, gap)
+        if not c then return end
+        if c.icon ~= glyph then c.group[1] = icon(glyph, size); c.icon = glyph end
+        c.text:setText(text)
+        c.text.fgcolor = grey and Blitbuffer.COLOR_GRAY_9 or Blitbuffer.COLOR_BLACK
+        c.group[2].width = gap
+        if c.group.resetLayout then c.group:resetLayout() end
+    end
+    set(cells.level, sun, label == "" and px(30) or px(22), label, false, label == "" and 0 or px(2))
+    local down_off, up_off = level <= 0, max and level >= max or false
+    set(cells.down, down_off and "k_sun_g" or "k_sun", px(22), "−", down_off, px(2))
+    set(cells.up, up_off and "k_sun_g" or "k_sun", px(22), "+", up_off, px(2))
+    self.light_text, self.light_icon = cells.level and cells.level.text, sun
+    UIManager:setDirty(self, "ui", self.light_region)
 end
 
 --- Header: "piątek, 13 listopada  stan na 14:30 · następne 14:45 ›" + ODŚWIEŻ.
@@ -4860,11 +4935,8 @@ function View:tap(t)
         Kitchen.quiet_light = nil
         local level = self.plugin:stepLight(t.delta)
         track("kuchnia", "light", tostring(level))
-        -- Q94: only the level cell repaints, the way the dashboard's light box does
-        if level and self.light_text then
-            self.light_text:setText(lightLabel(level))
-            UIManager:setDirty(self, "ui", self.light_region)
-        end
+        -- Q94/Q100: only ☼− · sun · ☼+ repaint, the way the dashboard's light box does
+        if level and self.light_cells then self:paintLight(level) end
     elseif t.kind == "home" then
         track("kuchnia", "home")
         return self:onClose() -- the dashboard is still under it; the screen turns back upright
@@ -4988,6 +5060,11 @@ end
 -- ---- E2 Gotuj: ingredients on the left (tap = in the pot), one step on the right
 
 ICON_SVG.k_sun = phosphor("M88,128a40,40,0,1,0,80,0a40,40,0,1,0,-80,0ZM118,16h20v36h-20ZM118,204h20v36h-20ZM16,118h36v20h-36ZM204,118h36v20h-36ZM42,56L56,42L81,67L67,81ZM214,56L200,42L175,67L189,81ZM42,200L56,214L81,189L67,175ZM214,200L200,214L175,189L189,175Z")
+-- Q100: Phosphor SunDim (bold, MIT) for a low light, the sun crossed out for
+-- none (white gap round the slash), and a grey sun for ☼− / ☼+ at the end (Q101).
+ICON_SVG.k_sun_dim = phosphor("M116,36V32a12,12,0,0,1,24,0v4a12,12,0,0,1-24,0Zm80,92a68,68,0,1,1-68-68A68.07,68.07,0,0,1,196,128Zm-24,0a44,44,0,1,0-44,44A44.05,44.05,0,0,0,172,128ZM51.51,68.49a12,12,0,1,0,17-17l-4-4a12,12,0,0,0-17,17Zm0,119-4,4a12,12,0,0,0,17,17l4-4a12,12,0,1,0-17-17ZM196,72a12,12,0,0,0,8.49-3.51l4-4a12,12,0,0,0-17-17l-4,4A12,12,0,0,0,196,72Zm8.49,115.51a12,12,0,0,0-17,17l4,4a12,12,0,0,0,17-17ZM48,128a12,12,0,0,0-12-12H32a12,12,0,0,0,0,24h4A12,12,0,0,0,48,128Zm80,80a12,12,0,0,0-12,12v4a12,12,0,0,0,24,0v-4A12,12,0,0,0,128,208Zm96-92h-4a12,12,0,0,0,0,24h4a12,12,0,0,0,0-24Z")
+ICON_SVG.k_sun_off = ICON_SVG.k_sun:gsub("</svg>$", [[<path d="M36,36L220,220" stroke="#FFFFFF" stroke-width="52" stroke-linecap="round"/><path d="M36,36L220,220" stroke="#000000" stroke-width="22" stroke-linecap="round"/></svg>]])
+ICON_SVG.k_sun_g = ICON_SVG.k_sun:gsub("#000000", "#999999")
 ICON_SVG.k_refresh = phosphor("M228,48V96a12,12,0,0,1-12,12H168a12,12,0,0,1,0-24h19l-7.8-7.8a75.55,75.55,0,0,0-53.32-22.26h-.43A75.49,75.49,0,0,0,72.39,75.57,12,12,0,1,1,55.61,58.41a99.38,99.38,0,0,1,69.87-28.47H126A99.42,99.42,0,0,1,196.2,59.23L204,67V48a12,12,0,0,1,24,0ZM183.61,180.43a75.49,75.49,0,0,1-53.09,21.63h-.43A75.55,75.55,0,0,1,76.77,179.8L69,172H88a12,12,0,0,0,0-24H40a12,12,0,0,0-12,12v48a12,12,0,0,0,24,0V189l7.8,7.8A99.42,99.42,0,0,0,130,226.06h.56a99.38,99.38,0,0,0,69.87-28.47,12,12,0,0,0-16.78-17.16Z")
 ICON_SVG.k_check_w = phosphor("M232.49,80.49l-128,128a12,12,0,0,1-17,0l-56-56a12,12,0,1,1,17-17L96,183,215.51,63.51a12,12,0,0,1,17,17Z"):gsub("#000000", "#FFFFFF")
 
