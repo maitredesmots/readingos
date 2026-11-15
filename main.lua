@@ -1051,12 +1051,19 @@ function Dashboard:build()
     local rows = {}
     local y = pad -- running screen-space offset used for hit registration
 
+    -- A± text step (the shared readingos_kitchen_font): text faces and the rows
+    -- that hold them multiply by sz.z; padding, icons, cover, chevrons, MIN_TAP,
+    -- the nav and the A±/☼ row stay put (same rule as the kitchen rail). The
+    -- Kitchen block is defined further down, so it is reached at call time.
+    local sz = { z = ReadingOS._Kitchen.zoom() }
+    sz.f = function(n) return dashFace(n * sz.z) end
+
     -- Text scales; fingers do not. Rows that can be tapped keep a floor of
     -- MIN_TAP so shrinking the font makes the dashboard denser rather than
     -- unusable — at 50 % an unclamped row would be a ~16 px target.
-    local h_label = Screen:scaleBySize(SIZE_LABEL * 2 * FONT_SCALE)
-    local h_row = math.max(MIN_TAP, Screen:scaleBySize(SIZE_ROW * 2 * FONT_SCALE))
-    local h_meta = Screen:scaleBySize(SIZE_META * 1.7 * FONT_SCALE)
+    local h_label = Screen:scaleBySize(SIZE_LABEL * 2 * FONT_SCALE) -- nav only: not scaled
+    local h_row = math.max(MIN_TAP, Screen:scaleBySize(SIZE_ROW * 2 * FONT_SCALE * sz.z))
+    local h_meta = Screen:scaleBySize(SIZE_META * 1.7 * FONT_SCALE * sz.z)
 
     local bord = Screen:scaleBySize(1)
     local card_pad = Screen:scaleBySize(9)
@@ -1166,13 +1173,13 @@ function Dashboard:build()
     local shown_at = self.age and (os.time() - self.age) or self.fetched_at or self.opened_at
     local status_text = ReadingOS._Kitchen.status({ offline = self.age ~= nil, next_event = self.next_event }, shown_at) .. " ›"
 
-    local hdr_h = Screen:scaleBySize(40)
+    local hdr_h = Screen:scaleBySize(40 * sz.z)
     local seg_pad = Screen:scaleBySize(9)
     local hdr_ico = Screen:scaleBySize(20)
     local hdr_gap = Screen:scaleBySize(6)
-    local f_hdr = dashFace(SIZE_META)
+    local f_hdr = sz.f(SIZE_META)
     local segs = {
-        { widget = text(os.date("%H:%M"), dashFace(SIZE_TITLE), { bold = true }) },
+        { widget = text(os.date("%H:%M"), sz.f(SIZE_TITLE), { bold = true }) },
         { widget = text(plDate(), f_hdr), optional = 2 },
     }
     if weather_text ~= "" then segs[#segs + 1] = { widget = text(weather_text, f_hdr), optional = 1 } end
@@ -1232,7 +1239,7 @@ function Dashboard:build()
     -- popup: you came here to read, and a modal on arrival would be an ambush.
     if self.plugin.update_ready then
         add(lrRow(cw, h_row, "AKTUALIZACJA  v" .. tostring(self.plugin.update_ready),
-            "zainstaluj  >", dashFace(SIZE_LABEL), dashFace(SIZE_META), true),
+            "zainstaluj  >", sz.f(SIZE_LABEL), sz.f(SIZE_META), true),
             h_row, { kind = "update", label = "update" })
         gap(8)
     end
@@ -1270,7 +1277,7 @@ function Dashboard:build()
     end
 
     local chev = Screen:scaleBySize(18)
-    local f_head = dashFace(SIZE_HEAD)
+    local f_head = sz.f(SIZE_HEAD)
     local ico_col = Screen:scaleBySize(56)
     local chev_col = chev + Screen:scaleBySize(6)
 
@@ -1333,14 +1340,14 @@ function Dashboard:build()
     do
         local bw = book_iw - lead_w - chev_col
         local content = VerticalGroup:new { align = "left",
-            text(book.title, dashFace(SIZE_ROW), { max_width = bw }) }
+            text(book.title, sz.f(SIZE_ROW), { max_width = bw }) }
         if book.author ~= "" or book.percent ~= "" then
             local meta = HorizontalGroup:new {}
             if book.author ~= "" then
-                table.insert(meta, text(book.author, dashFace(SIZE_META), { gray = true, max_width = math.floor(bw * 0.7) }))
+                table.insert(meta, text(book.author, sz.f(SIZE_META), { gray = true, max_width = math.floor(bw * 0.7) }))
                 table.insert(meta, HorizontalSpan:new { width = Screen:scaleBySize(14) })
             end
-            if book.percent ~= "" then table.insert(meta, text(book.percent, dashFace(SIZE_META))) end
+            if book.percent ~= "" then table.insert(meta, text(book.percent, sz.f(SIZE_META))) end
             table.insert(content, meta)
         end
         table.insert(content, VerticalSpan:new { width = Screen:scaleBySize(6) })
@@ -1399,13 +1406,13 @@ function Dashboard:build()
         task_items[#task_items + 1] = { widget = cardRow(h_row, summary_widget, chevron()) }
         -- Preview off: the header line alone, still the way into the task view.
         if show_preview and #tasks == 0 then
-            task_items[#task_items + 1] = { widget = cardRow(h_row, text("nic na mnie", dashFace(SIZE_META), { gray = true })) }
+            task_items[#task_items + 1] = { widget = cardRow(h_row, text("nic na mnie", sz.f(SIZE_META), { gray = true })) }
         elseif show_preview then
             task_items[#task_items + 1] = { widget = hline(iw) }
             for i = 1, math.min(max_tasks, #tasks) do
                 local it = tasks[i]
                 task_items[#task_items + 1] = {
-                    widget = lrRow(iw, h_row, rowText(it), it.meta, dashFace(SIZE_ROW), dashFace(SIZE_META), false),
+                    widget = lrRow(iw, h_row, rowText(it), it.meta, sz.f(SIZE_ROW), sz.f(SIZE_META), false),
                 }
             end
         end
@@ -1414,7 +1421,7 @@ function Dashboard:build()
         -- footer: staleness / one rotating hint, inert, glance-only.
         if foot ~= "" then
             gap(10)
-            local ft = text(foot, dashFace(SIZE_META), { gray = true })
+            local ft = text(foot, sz.f(SIZE_META), { gray = true })
             local fh = size(ft, h_meta).h
             add(CenterContainer:new { dimen = Geom:new { w = cw, h = fh }, ft }, fh)
         end
@@ -1464,9 +1471,9 @@ function Dashboard:build()
     if act then
         gap(6)
         if act.undone then
-            add(lrRow(cw, h_row, _("Cofnięte: ") .. tostring(act.label), "", dashFace(SIZE_LABEL), dashFace(SIZE_META)), h_row)
+            add(lrRow(cw, h_row, _("Cofnięte: ") .. tostring(act.label), "", sz.f(SIZE_LABEL), sz.f(SIZE_META)), h_row)
         else
-            add(lrRow(cw, h_row, "✓ " .. tostring(act.label), "COFNIJ", dashFace(SIZE_LABEL), dashFace(SIZE_META), false),
+            add(lrRow(cw, h_row, "✓ " .. tostring(act.label), "COFNIJ", sz.f(SIZE_LABEL), sz.f(SIZE_META), false),
                 h_row, { kind = "undo", label = tostring(act.label) })
         end
     end
