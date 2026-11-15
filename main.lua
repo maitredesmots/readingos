@@ -4063,6 +4063,8 @@ ICON_SVG.k_cook = phosphor("M253.76,93A12,12,0,0,0,237,90.24l-9,6.44V80a12,12,0,
 ICON_SVG.k_pantry = phosphor("M188,49.68V32a20,20,0,0,0-20-20H88A20,20,0,0,0,68,32V49.68A44.06,44.06,0,0,0,36,92V200a44.05,44.05,0,0,0,44,44h96a44.05,44.05,0,0,0,44-44V92A44.06,44.06,0,0,0,188,49.68ZM164,48H140V36h24ZM116,36V48H92V36Zm80,164a20,20,0,0,1-20,20H80a20,20,0,0,1-20-20V92A20,20,0,0,1,80,72h96a20,20,0,0,1,20,20Z")
 ICON_SVG.k_plan = phosphor("M208,28H188V24a12,12,0,0,0-24,0v4H92V24a12,12,0,0,0-24,0v4H48A20,20,0,0,0,28,48V208a20,20,0,0,0,20,20H208a20,20,0,0,0,20-20V48A20,20,0,0,0,208,28ZM68,52a12,12,0,0,0,24,0h72a12,12,0,0,0,24,0h16V76H52V52ZM52,204V100H204V204Zm92-76a16,16,0,1,1-16-16A16,16,0,0,1,144,128Zm48,0a16,16,0,1,1-16-16A16,16,0,0,1,192,128ZM96,176a16,16,0,1,1-16-16A16,16,0,0,1,96,176Zm48,0a16,16,0,1,1-16-16A16,16,0,0,1,144,176Zm48,0a16,16,0,1,1-16-16A16,16,0,0,1,192,176Z")
 ICON_SVG.k_read = phosphor("M232,44H160a43.86,43.86,0,0,0-32,13.85A43.86,43.86,0,0,0,96,44H24A12,12,0,0,0,12,56V200a12,12,0,0,0,12,12H96a20,20,0,0,1,20,20,12,12,0,0,0,24,0,20,20,0,0,1,20-20h72a12,12,0,0,0,12-12V56A12,12,0,0,0,232,44ZM96,188H36V68H96a20,20,0,0,1,20,20V192.81A43.79,43.79,0,0,0,96,188Zm124,0H160a43.71,43.71,0,0,0-20,4.83V88a20,20,0,0,1,20-20h60Z")
+-- Q93 (2.16.2): the rail's first cell goes back to the ReadingOS dashboard.
+ICON_SVG.k_home = phosphor("M222.14,105.85l-80-80a20,20,0,0,0-28.28,0l-80,80A19.86,19.86,0,0,0,28,120v96a12,12,0,0,0,12,12h64a12,12,0,0,0,12-12V164h24v52a12,12,0,0,0,12,12h64a12,12,0,0,0,12-12V120A19.86,19.86,0,0,0,222.14,105.85ZM204,204H164V152a12,12,0,0,0-12-12H104a12,12,0,0,0-12,12v52H52V121.65l76-76,76,76Z")
 for _i, r in ipairs(RAIL) do
     ICON_SVG[r.icon .. "_w"] = ICON_SVG[r.icon]:gsub("#000000", "#FFFFFF")
 end
@@ -4553,16 +4555,20 @@ end
 
 function View:buildRail(w, H)
     local inner = w - px(3)
-    local cells = {}
-    for _i, r in ipairs(RAIL) do
-        cells[#cells + 1] = { icon = r.icon, on = r.key == self.screen, target = { kind = "rail", key = r.key } }
+    local cells = { { icon = "k_home", target = { kind = "home" } } } -- Q93: back to the dashboard
+    self.light_text, self.light_region = nil, nil
+    for i, r in ipairs(RAIL) do
+        cells[#cells + 1] = { icon = r.icon, on = r.key == self.screen, rule = i == 1 and 3 or nil,
+            target = { kind = "rail", key = r.key } }
     end
     -- Q65: text size and light, the same spot on every kitchen screen
     local step = Kitchen.fontStep()
     cells[#cells + 1] = { label = "A−", off = step <= Kitchen.ZOOM_MIN, rule = 3, target = { kind = "zoom", delta = -1 } }
     cells[#cells + 1] = { label = "A+", off = step >= Kitchen.ZOOM_MAX, target = { kind = "zoom", delta = 1 } }
-    if self.plugin.lightLevel and self.plugin:lightLevel() then -- no front light, no ☼ cells
+    local level = self.plugin.lightLevel and self.plugin:lightLevel()
+    if level then -- no front light, no ☼ cells
         cells[#cells + 1] = { icon = "k_sun", label = "−", rule = 3, target = { kind = "light", delta = -LIGHT_STEP } }
+        cells[#cells + 1] = { label = lightLabel(level), level = true } -- Q94: where the light is now
         cells[#cells + 1] = { icon = "k_sun", label = "+", target = { kind = "light", delta = LIGHT_STEP } }
     end
     local col = VerticalGroup:new { align = "left" }
@@ -4577,6 +4583,10 @@ function View:buildRail(w, H)
                 fgcolor = c.off and Blitbuffer.COLOR_GRAY_9 or Blitbuffer.COLOR_BLACK }
             face = c.icon and HorizontalGroup:new { align = "center", icon(c.icon, px(22)),
                 HorizontalSpan:new { width = px(2) }, text } or text
+            if c.level then
+                self.light_text = text
+                self.light_region = Geom:new { x = 0, y = y + line, w = inner, h = h - line }
+            end
         else
             face = icon(c.on and (c.icon .. "_w") or c.icon, px(28))
         end
@@ -4585,7 +4595,7 @@ function View:buildRail(w, H)
             bordersize = 0, padding = 0, margin = 0, width = inner, height = h - line,
             cell(inner, h - line, face, 0, true),
         })
-        self:claim(0, y, w, y + h, c.target)
+        if c.target then self:claim(0, y, w, y + h, c.target) end
         y = y + h
     end
     return HorizontalGroup:new { align = "top", col, vline(H) }
@@ -4845,10 +4855,19 @@ function View:tap(t)
             self:redraw()
         end
     elseif t.kind == "light" then
-        -- the light itself is the feedback; nothing on screen changes.
+        -- the light is the feedback; only the level cell between ☼− and ☼+ changes.
         -- In quiet it is Leo's choice from here: nothing to give back (Q80).
         Kitchen.quiet_light = nil
-        track("kuchnia", "light", tostring(self.plugin:stepLight(t.delta)))
+        local level = self.plugin:stepLight(t.delta)
+        track("kuchnia", "light", tostring(level))
+        -- Q94: only the level cell repaints, the way the dashboard's light box does
+        if level and self.light_text then
+            self.light_text:setText(lightLabel(level))
+            UIManager:setDirty(self, "ui", self.light_region)
+        end
+    elseif t.kind == "home" then
+        track("kuchnia", "home")
+        return self:onClose() -- the dashboard is still under it; the screen turns back upright
     elseif t.kind == "rail" then
         if t.key == "read" then return self:toBook() end
         if t.key ~= self.screen or self.pantry_used then
@@ -8816,6 +8835,11 @@ function ReadingOS:patchScreensaver()
         Device.screen_saver_mode = true
 
         local function draw()
+            -- TERAZ and KUCHNIA first, before ANY sleep page — ours or the
+            -- cover fallback below: they hold the screen sideways, and
+            -- KOReader's cover page would save "sideways" as the mode to
+            -- wake into (PW3 2026-11-15: dashboard drawn sideways on wake).
+            closeOpenTeraz()
             local data, is_stale = plugin:ssFetch()
             if not data then
                 -- Nothing to say is not a reason to leave a half-drawn page:
@@ -8828,9 +8852,6 @@ function ReadingOS:patchScreensaver()
                 G_reader_settings:saveSetting("screensaver_type", SS_TYPE)
                 return
             end
-            -- TERAZ first: it holds the screen sideways and would turn it
-            -- back after this page is drawn.
-            closeOpenTeraz()
             -- Sideways before the widget is built: every row measures itself
             -- against Screen:getWidth(), which is only 1448 once we are turned.
             ssEnterLandscape()
