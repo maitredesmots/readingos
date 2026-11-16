@@ -1558,7 +1558,6 @@ function Dashboard:build()
     local nav_items = {
         { icon = "k_tasks", label = "ZADANIA", target = { screen = "tasks", label = "tasks" } },
         { icon = "k_cook", label = "KUCHNIA", target = { screen = "kitchen", label = "kitchen" } },
-        { icon = "fork", label = "JEDZENIE", count = show_counts and shopping.total or nil, target = { screen = "foood", label = "foood" } },
         { icon = "yarn", label = "CRAFTSSS", target = { screen = "crafts", label = "crafts" } },
         { icon = "more", label = "WIĘCEJ", target = { kind = "more", label = "more" } },
     }
@@ -3326,7 +3325,7 @@ function ReadingOS:openScreen(dashboard, screen)
         return self:showHelp()
 
     elseif screen == "tasks" then
-        return self:openTasksView(dashboard)
+        return self:openZadania(dashboard)
 
     elseif screen == "foood" then
         return self:openFoood(dashboard)
@@ -4121,10 +4120,10 @@ local CACHE_FILE = DataStorage:getDataDir() .. "/cache/readingos-kitchen.json"
 local UNDO_S = 120 -- Q61: COFNIJ stays in the footer for two minutes
 ReadingOS.UNDO_S = UNDO_S -- home reads it at call time
 local RAIL = {
-    { key = "tasks", icon = "k_tasks" },
     { key = "cook", icon = "k_cook" },
     { key = "pantry", icon = "k_pantry" },
     { key = "plan", icon = "k_plan" },
+    { key = "recipes", icon = "k_recipes" }, -- 2.19 PRZEPISY
     { key = "read", icon = "k_read" },
 }
 
@@ -4137,6 +4136,8 @@ ICON_SVG.k_cook = phosphor("M253.76,93A12,12,0,0,0,237,90.24l-9,6.44V80a12,12,0,
 ICON_SVG.k_pantry = phosphor("M188,49.68V32a20,20,0,0,0-20-20H88A20,20,0,0,0,68,32V49.68A44.06,44.06,0,0,0,36,92V200a44.05,44.05,0,0,0,44,44h96a44.05,44.05,0,0,0,44-44V92A44.06,44.06,0,0,0,188,49.68ZM164,48H140V36h24ZM116,36V48H92V36Zm80,164a20,20,0,0,1-20,20H80a20,20,0,0,1-20-20V92A20,20,0,0,1,80,72h96a20,20,0,0,1,20,20Z")
 ICON_SVG.k_plan = phosphor("M208,28H188V24a12,12,0,0,0-24,0v4H92V24a12,12,0,0,0-24,0v4H48A20,20,0,0,0,28,48V208a20,20,0,0,0,20,20H208a20,20,0,0,0,20-20V48A20,20,0,0,0,208,28ZM68,52a12,12,0,0,0,24,0h72a12,12,0,0,0,24,0h16V76H52V52ZM52,204V100H204V204Zm92-76a16,16,0,1,1-16-16A16,16,0,0,1,144,128Zm48,0a16,16,0,1,1-16-16A16,16,0,0,1,192,128ZM96,176a16,16,0,1,1-16-16A16,16,0,0,1,96,176Zm48,0a16,16,0,1,1-16-16A16,16,0,0,1,144,176Zm48,0a16,16,0,1,1-16-16A16,16,0,0,1,192,176Z")
 ICON_SVG.k_read = phosphor("M232,44H160a43.86,43.86,0,0,0-32,13.85A43.86,43.86,0,0,0,96,44H24A12,12,0,0,0,12,56V200a12,12,0,0,0,12,12H96a20,20,0,0,1,20,20,12,12,0,0,0,24,0,20,20,0,0,1,20-20h72a12,12,0,0,0,12-12V56A12,12,0,0,0,232,44ZM96,188H36V68H96a20,20,0,0,1,20,20V192.81A43.79,43.79,0,0,0,96,188Zm124,0H160a43.71,43.71,0,0,0-20,4.83V88a20,20,0,0,1,20-20h60Z")
+-- 2.19 PRZEPISY: Phosphor Notebook bold (MIT). BookOpen is k_read's already.
+ICON_SVG.k_recipes = phosphor("M108,108a12,12,0,0,1,12-12h56a12,12,0,0,1,0,24H120A12,12,0,0,1,108,108Zm68,28H120a12,12,0,0,0,0,24h56a12,12,0,0,0,0-24Zm52-88V208a20,20,0,0,1-20,20H48a20,20,0,0,1-20-20V48A20,20,0,0,1,48,28H208A20,20,0,0,1,228,48ZM52,204H68V52H52ZM204,52H92V204H204Z")
 -- Q93 (2.16.2): the rail's first cell goes back to the ReadingOS dashboard.
 ICON_SVG.k_home = phosphor("M222.14,105.85l-80-80a20,20,0,0,0-28.28,0l-80,80A19.86,19.86,0,0,0,28,120v96a12,12,0,0,0,12,12h64a12,12,0,0,0,12-12V164h24v52a12,12,0,0,0,12,12h64a12,12,0,0,0,12-12V120A19.86,19.86,0,0,0,222.14,105.85ZM204,204H164V152a12,12,0,0,0-12-12H104a12,12,0,0,0-12,12v52H52V121.65l76-76,76,76Z")
 for _i, r in ipairs(RAIL) do
@@ -4539,7 +4540,8 @@ local View = InputContainer:extend {
     data = nil,
     offline = false,
     saved_at = nil,
-    screen = "tasks",
+    screen = "cook",  -- 2.19: KUCHNIA opens on GOTUJ; ZADANIA is tasks_only below
+    tasks_only = false, -- true = the standalone ZADANIA view: no rail, own ✕, screen "tasks"
     chip = nil,       -- nil = WSZYSTKO
     now_page = 1,
     later_page = 1,
@@ -4566,7 +4568,7 @@ function View:init()
     if Device:isTouchDevice() then
         self.ges_events = { Tap = { GestureRange:new { ges = "tap", range = self.dimen } } }
     end
-    self.refresh_cb = function() self:refresh() end
+    self.refresh_cb = function() self:refresh() end -- post-action refetch: manual, leaves a recipe
     self.event_cb = function() self:quietEvent() end
     self.undo_cb = function() if not self.closed then self:redraw() end end
     self:schedule()
@@ -4612,13 +4614,18 @@ function View:quietEvent()
         Kitchen.lightBack(self.plugin) -- Q85: auto WŁ gives the level back at the end
         track("kuchnia", "quiet", "end")
     end
-    return self:refresh() -- Q84: quiet starts with one last fetch, the frozen view
+    return self:refresh(true) -- Q84: quiet starts with one last fetch, the frozen view
 end
 
 --- On schedule, and right after a tap. Always redraws: the header's
 --- "stan na" is part of what the screen says.
-function View:refresh()
+function View:refresh(scheduled)
     if self.closed then return end
+    if self.recipe_mode then
+        -- a timer never pulls today's data under a recipe being cooked; ⟳ does
+        if scheduled then return self:schedule() end
+        self:leaveRecipe(true)
+    end
     self:syncAwake()
     local data, offline, saved_at = Kitchen.fetch(nil, self:pantrySearchQuery())
     if data then
@@ -4645,7 +4652,7 @@ end
 function View:build()
     self.hit = {}
     local W, H = self.dimen.w, self.dimen.h
-    local rail_w = px(56)
+    local rail_w = self.tasks_only and 0 or px(56)
     local body
     if self.screen == "tasks" then
         body = self:buildTasks(rail_w, W - rail_w, H)
@@ -4655,14 +4662,20 @@ function View:build()
         body = self:buildUsed(rail_w, W - rail_w, H) or self:buildPantry(rail_w, W - rail_w, H)
     elseif self.screen == "plan" then
         body = self:buildPlan(rail_w, W - rail_w, H)
+    elseif self.screen == "recipes" then
+        body = self:buildRecipes(rail_w, W - rail_w, H)
     elseif self.screen == "settings" then
         body = self:buildSettings(rail_w, W - rail_w, H)
     else
         body = cell(W - rail_w, H, ktext(_("Wkrótce."), 18, true), 0, true)
     end
+    if self.tasks_only then -- no rail to hold the height: a short body (settings) is padded down to the edge
+        local bh = body:getSize().h
+        if bh < H then body = VerticalGroup:new { align = "left", body, VerticalSpan:new { width = H - bh } } end
+    end
     return FrameContainer:new {
         background = Blitbuffer.COLOR_WHITE, bordersize = 0, padding = 0, margin = 0, width = W, height = H,
-        HorizontalGroup:new { align = "top", self:buildRail(rail_w, H), body },
+        HorizontalGroup:new { align = "top", self.tasks_only and body or self:buildRail(rail_w, H), (not self.tasks_only) and body or nil },
     }
 end
 
@@ -4758,7 +4771,8 @@ function View:buildHeader(x0, w)
     local d = self.data or {}
     local h = px(56)
     local gap = px(8)
-    local btn_w = 2 * px(46) + gap
+    local close_w = self.tasks_only and (px(46) + gap) or 0 -- standalone ZADANIA: ✕ after ⟳
+    local btn_w = 2 * px(46) + gap + close_w
     local status = Kitchen.status(self)
     local title = d.today_label or ""
     if d.today and d.today ~= os.date("%Y-%m-%d") then title = _("NIEAKTUALNE · ") .. title end
@@ -4772,10 +4786,18 @@ function View:buildHeader(x0, w)
     local row = HorizontalGroup:new { align = "center",
         cell(w - btn_w - px(14), h - px(3), left, px(14)),
         Kitchen.settingsBtn(), HorizontalSpan:new { width = gap }, Kitchen.refreshBtn(),
+        self.tasks_only and HorizontalSpan:new { width = gap } or HorizontalSpan:new { width = 0 },
+        self.tasks_only and Kitchen.iconBtn("close") or HorizontalSpan:new { width = 0 },
     }
     local bx = x0 + w - btn_w - px(14)
     self:claim(x0, 0, bx + px(46) + math.floor(gap / 2), h, { kind = "settings" })
-    self:claim(bx + px(46) + math.floor(gap / 2), 0, x0 + w, h, { kind = "refresh" })
+    if self.tasks_only then
+        local cx = bx + 2 * px(46) + gap + math.floor(gap / 2)
+        self:claim(bx + px(46) + math.floor(gap / 2), 0, cx, h, { kind = "refresh" })
+        self:claim(cx, 0, x0 + w, h, { kind = "close" })
+    else
+        self:claim(bx + px(46) + math.floor(gap / 2), 0, x0 + w, h, { kind = "refresh" })
+    end
     return VerticalGroup:new { align = "left", row, hline(w, 3) }, h
 end
 
@@ -5009,6 +5031,7 @@ function View:tap(t)
     if self:cookTap(t) then return true end
     if self:pantryTap(t) then return true end
     if self:planTap(t) then return true end
+    if self:recipesTap(t) then return true end
     if self:settingsTap(t) then return true end
     if t.kind == "zoom" then
         local n = math.max(Kitchen.ZOOM_MIN, math.min(Kitchen.ZOOM_MAX, Kitchen.fontStep() + t.delta))
@@ -5025,12 +5048,17 @@ function View:tap(t)
         track("kuchnia", "light", tostring(level))
         -- Q94/Q100: only ☼− · sun · ☼+ repaint, the way the dashboard's light box does
         if level and self.light_cells then self:paintLight(level) end
+    elseif t.kind == "close" then
+        track("zadania", "close")
+        return self:onClose() -- same close hook (home_stale → refreshInto / rebuildForUndo)
     elseif t.kind == "home" then
         track("kuchnia", "home")
         return self:onClose() -- the dashboard is still under it; the screen turns back upright
     elseif t.kind == "rail" then
         if t.key == "read" then return self:toBook() end
-        if t.key ~= self.screen or self.pantry_used then
+        local was_recipe = self.recipe_mode
+        if was_recipe then self:leaveRecipe() end
+        if t.key ~= self.screen or self.pantry_used or was_recipe then
             track("kuchnia", "screen", t.key)
             self.screen, self.pantry_used = t.key, nil -- the rail leaves Co zeszło without saving
             self:redraw()
@@ -5052,7 +5080,7 @@ function View:tap(t)
     elseif t.kind == "tomorrow" then
         self.plugin:showList(_("JUTRO"), listOf(chipFilter((d.tasks or {}).tomorrow, self.chip), _("Jutro nic.")))
     elseif t.kind == "cook" then
-        self.screen = "cook"
+        self.tasks_only, self.screen = false, "cook" -- the meal block in ZADANIA leads into KUCHNIA
         self:redraw()
     elseif t.kind == "refresh" then
         track("kuchnia", "refresh")
@@ -5669,7 +5697,8 @@ end
 
 function View:buildCook(x0, w, H)
     local c = (self.data or {}).cook
-    local strip, sh = self:nowStrip(x0, 0, w)
+    local strip, sh
+    if self.recipe_mode then strip, sh = self:recipeStrip(x0, 0, w) else strip, sh = self:nowStrip(x0, 0, w) end
     if type(c) ~= "table" then
         return VerticalGroup:new { align = "left", strip,
             cell(w, H - sh, VerticalGroup:new { align = "center",
@@ -5719,7 +5748,7 @@ function View:cookTap(t)
         self.plugin:showList(_("UWAGI"), items)
         return true
     elseif t.kind == "strip" then
-        self.screen = "tasks"
+        self:toZadania()
         track("kuchnia", "screen", "tasks")
     elseif t.kind == "cook_end" then
         self.screen, self.pantry_used = "pantry", true
@@ -5853,13 +5882,15 @@ function View:pantrySections()
         end
         return out, n
     end
-    local low, n_low = live(p.low, {})
+    -- Q258: no KOŃCZY SIĘ block; low rows lead RESZTA, nothing hidden
+    local _l, n_low = live(p.low, rest)
     local _r, n_rest = live(p.rest, rest)
+    n_rest = n_rest + n_low
     live(p.needed, need)
     local gen = Kitchen.MEAL_GEN[lowerKey(Kitchen.str((d.meal or {}).label))]
     local label = gen and (_("POTRZEBNE DZIŚ DO ") .. gen) or _("POTRZEBNE DZIŚ")
     return { { label = label, rows = need } },
-        { { label = _("KOŃCZY SIĘ · ") .. n_low, rows = low }, { label = _("RESZTA · ") .. n_rest, rows = rest } }
+        { { label = _("RESZTA · ") .. n_rest, rows = rest } }
 end
 
 --- "Spiżarnia  stan na 14:30 · zużyte dziś: 2 ›"   ZAKUPY · 4 ›   ⚙ ⟳
@@ -6597,7 +6628,8 @@ function View:pantryTap(t)
     elseif k == "u_page" and st then
         st.used_page = t.to
     elseif k == "u_later" then
-        self.screen, self.pantry_used = "tasks", nil
+        self.pantry_used = nil
+        self:toZadania()
     elseif k == "u_close" then
         self.screen, self.pantry_used = "cook", nil
     elseif k == "u_save" then
@@ -6837,6 +6869,133 @@ function View:planFooter(x0, y0, w, h, p)
     return HorizontalGroup:new { align = "center",
         cell(w - right_w - px(14), h, ktext(left, 14, true, w - right_w - 3 * px(14)), px(14)),
         ktext(right, 14, true) }
+end
+
+-- ---- 2.19 PRZEPISY: every Foood recipe, tap = cook it (even off-plan)
+
+--- Black band over a recipe's Gotuj: ‹ PRZEPISY back, PRZEPIS marker.
+function View:recipeStrip(x0, y0, w)
+    local h = zpx(40)
+    local right = _("PRZEPIS")
+    local right_w = ktext(right, 14, true):getSize().w
+    self:claim(x0, y0, x0 + w - right_w - 2 * px(14), y0 + h, { kind = "r_back" })
+    return FrameContainer:new {
+        background = Blitbuffer.COLOR_BLACK, bordersize = 0, padding = 0, margin = 0, width = w, height = h,
+        HorizontalGroup:new { align = "center",
+            cell(w - right_w - px(14), h, ktext("‹ " .. _("PRZEPISY"), 14, true, w - right_w - 3 * px(14), true), px(14)),
+            ktext(right, 14, true, nil, true),
+        },
+    }, h
+end
+
+--- The recipe list lives on today's payload, also while a recipe is open.
+function View:recipeList()
+    local d = self.today_data or self.data or {}
+    return type(d.recipes) == "table" and d.recipes or nil
+end
+
+function View:buildRecipes(x0, w, H)
+    local strip, sh = self:nowStrip(x0, 0, w)
+    local list = self:recipeList()
+    local h, pad, gap, bw = px(54), px(14), px(8), px(46)
+    local left_w = w - pad - 2 * bw - gap - pad
+    local count = list and #list or 0
+    local title = ktext(_("Przepisy") .. (list and (" · " .. count) or ""), 22, true, left_w - pad)
+    local status = ktext(Kitchen.status(self), 14, false, math.max(1, left_w - pad - title:getSize().w - px(12)))
+    local bx = x0 + left_w
+    self:claim(x0, sh, bx + bw + math.floor(gap / 2), sh + h, { kind = "settings" })
+    self:claim(bx + bw + math.floor(gap / 2), sh, x0 + w, sh + h, { kind = "refresh" })
+    local header = HorizontalGroup:new { align = "center",
+        cell(left_w, h, HorizontalGroup:new { align = "center", title, HorizontalSpan:new { width = px(12) }, status }, pad),
+        Kitchen.settingsBtn(), HorizontalSpan:new { width = gap }, Kitchen.refreshBtn() }
+    local top = sh + h + px(3)
+    local foot_h = px(58) -- holds the 44 px ‹ › buttons at every A± step, as Spiżarnia's footer
+    local ch = H - top - foot_h
+    local head = { strip, header, hline(w, 3) }
+    if not list or #list == 0 then
+        local note = list and _("Brak przepisów w Foood.") or _("Zaktualizuj serwer Hooome, żeby zobaczyć przepisy.")
+        return VerticalGroup:new { align = "left", unpack(head),
+            cell(w, H - top, ktext(note, 18, true, w - 2 * pad), 0, true) }
+    end
+    local row_h = math.max(zpx(56), MIN_TAP + px(2))
+    local per = math.max(1, math.floor(ch / row_h))
+    local pages = math.max(1, math.ceil(#list / per))
+    local page = math.max(1, math.min(self.recipe_page or 1, pages))
+    self.recipe_page = page
+    local rows = VerticalGroup:new { align = "left" }
+    for i = (page - 1) * per + 1, math.min(#list, page * per) do
+        local r = list[i]
+        local mins = tonumber(r.minutes)
+        local meta = mins and (mins .. " min") or ""
+        local mt = ktext(meta, 14, true)
+        local mw = meta ~= "" and mt:getSize().w or 0
+        local y = top + (i - (page - 1) * per - 1) * row_h
+        table.insert(rows, VerticalGroup:new { align = "left",
+            HorizontalGroup:new { align = "center",
+                cell(w - mw - 2 * pad, row_h - px(1), ktext(Kitchen.str(r.title), 18, true, w - mw - 3 * pad), pad),
+                cell(mw + pad, row_h - px(1), mt, 0) },
+            hline(w) })
+        self:claim(x0, y, x0 + w, y + row_h, { kind = "recipe", id = r.id })
+    end
+    local used = math.min(#list - (page - 1) * per, per) * row_h
+    local fy = top + ch
+    local pg = pages > 1 and string.format(_("strona %d z %d"), page, pages) or ""
+    local nav_w = pages > 1 and (2 * px(60) + px(8)) or 0
+    local frow = HorizontalGroup:new { align = "center",
+        cell(w - 2 * pad - nav_w - (nav_w > 0 and px(12) or 0), foot_h, ktext(pg, 12, false, w), 0) }
+    if pages > 1 then
+        table.insert(frow, HorizontalSpan:new { width = px(12) })
+        table.insert(frow, button(px(60), px(44), "‹", 18, false))
+        table.insert(frow, HorizontalSpan:new { width = px(8) })
+        table.insert(frow, button(px(60), px(44), "›", 18, true))
+        local nx = x0 + w - pad - nav_w
+        local mid = nx + px(60) + math.floor(px(8) / 2)
+        self:claim(nx - math.floor(px(12) / 2), fy, mid, fy + foot_h, { kind = "r_page", to = (page - 2) % pages + 1 })
+        self:claim(mid, fy, x0 + w, fy + foot_h, { kind = "r_page", to = page % pages + 1 })
+    end
+    return VerticalGroup:new { align = "left", unpack(head), rows,
+        VerticalSpan:new { width = ch - used }, cell(w, foot_h, frow, pad) }
+end
+
+--- Back to today's cook/meal/pantry. `quiet` = the caller refetches anyway.
+function View:leaveRecipe(quiet)
+    if not self.recipe_mode then return end
+    local acted = self.acted_at ~= self.recipe_acted0
+    self.data, self.today_data, self.recipe_mode, self.recipe_acted0 = self.today_data or self.data, nil, nil, nil
+    if acted and not quiet then self:refresh() end -- ZUŻYTE/ticks changed the pantry: today's copy is stale
+end
+
+function View:openRecipe(id)
+    local data = Kitchen.fetch(nil, Kitchen.query { { "cook", id } }) -- a search path: never cached
+    if type(data) ~= "table" or type(data.cook) ~= "table" then
+        UIManager:show(InfoMessage:new { text = _("Brak połączenia — przepis otworzysz po odświeżeniu."), timeout = 4 })
+        return true
+    end
+    local today = self.today_data or self.data or {}
+    local merged = {}
+    for k, v in pairs(today) do merged[k] = v end
+    merged.cook, merged.meal, merged.pantry = data.cook, data.meal, data.pantry
+    if not self.today_data then self.today_data, self.recipe_acted0 = today, self.acted_at end
+    self.data, self.recipe_mode, self.screen, self.pantry_used = merged, true, "cook", nil
+    track("kuchnia", "recipe", tostring(id))
+    self:redraw()
+    return true
+end
+
+function View:recipesTap(t)
+    local k = t.kind
+    if k == "r_page" then
+        self.recipe_page = t.to
+    elseif k == "recipe" then
+        return self:openRecipe(t.id)
+    elseif k == "r_back" then
+        self:leaveRecipe()
+        self.screen = "recipes"
+    else
+        return false
+    end
+    self:redraw()
+    return true
 end
 
 function View:buildPlan(x0, w, H)
@@ -7261,9 +7420,15 @@ function View:settingsSave(key, value)
     return true
 end
 
+--- 2.19: ZADANIA is no KUCHNIA tab; a jump to it turns this view into the
+--- standalone one (no rail, own ✕), same data, same close hook.
+function View:toZadania()
+    self.tasks_only, self.screen, self.pantry_used = true, "tasks", nil
+end
+
 --- ✕ in KUCHNIA: back to the screen it was opened from.
 function View:settingsClose()
-    self.screen, self.prev_screen = self.prev_screen or "tasks", nil
+    self.screen, self.prev_screen = self.prev_screen or (self.tasks_only and "tasks" or "cook"), nil
     self:redraw()
     return true
 end
@@ -7427,16 +7592,22 @@ function Kitchen.openSettings(plugin, tab)
     UIManager:show(SettingsView:new { plugin = plugin, stab = tab or "refresh" })
 end
 
-function ReadingOS:openKitchen(dashboard)
+function ReadingOS:openKitchen(dashboard, opts)
+    local tasks_only = type(opts) == "table" and opts.tasks_only == true
     local data, offline, saved_at = Kitchen.fetch()
     if not data then
         track("kuchnia", "open", "no data")
         UIManager:show(InfoMessage:new { text = _("Brak danych kuchni. Połącz się z Wi-Fi i spróbuj jeszcze raz.") })
         return
     end
-    track("kuchnia", "open", offline and "offline" or nil)
+    track(tasks_only and "zadania" or "kuchnia", "open", offline and "offline" or nil)
     UIManager:show(View:new { plugin = self, dashboard = dashboard, data = data, offline = offline,
-        saved_at = saved_at }, "full")
+        saved_at = saved_at, tasks_only = tasks_only or nil, screen = tasks_only and "tasks" or "cook" }, "full")
+end
+
+--- 2.19 standalone ZADANIA: KUCHNIA's task view, full width, ✕ back home.
+function ReadingOS:openZadania(dashboard)
+    return self:openKitchen(dashboard, { tasks_only = true })
 end
 ReadingOS._Kitchen = Kitchen -- test_kitchen_layout.lua
 end -- kuchnia
