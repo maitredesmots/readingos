@@ -807,6 +807,18 @@ local function lrRow(width, height, left, right, left_face, right_face, right_gr
     return group
 end
 
+--- COFNIJ as a button (2.18.2): black fill, white bold text, rounded: the look of
+--- GOTUJ › in KUCHNIA. Sized by its text + padding, so a row only has to be one
+--- text line plus 2 × pady tall. A field, not a local (200-local limit).
+function ReadingOS.blackBtn(label, face, padx, pady)
+    return FrameContainer:new {
+        background = Blitbuffer.COLOR_BLACK, bordersize = 0, radius = Screen:scaleBySize(6),
+        padding = 0, margin = 0, padding_left = padx, padding_right = padx,
+        padding_top = pady, padding_bottom = pady,
+        TextWidget:new { text = label, face = face, bold = true, fgcolor = Blitbuffer.COLOR_WHITE, padding = 0 },
+    }
+end
+
 --- What a row says, in the order the list is sorted in: kind, priority, clock,
 --- title. Reading the row therefore explains why it sits where it does — and a
 --- glance down the left edge finds the urgent ones without reading any titles.
@@ -1168,10 +1180,10 @@ function Dashboard:build()
     local show_batt = has_batt and (charging or capacity <= 20)
     local batt_text = has_batt and (charging and ("\u{26A1}" .. capacity .. "%") or (capacity .. "%")) or "—"
 
-    -- "stan na HH:MM ›": KUCHNIA's own wording (Kitchen.status) with the time of
-    -- the data on screen; a tap opens the one settings screen.
+    -- "stan na HH:MM": KUCHNIA's own wording (Kitchen.status) with the time of
+    -- the data on screen; the ⚙ button after it (and the text) open the one settings screen.
     local shown_at = self.age and (os.time() - self.age) or self.fetched_at or self.opened_at
-    local status_text = ReadingOS._Kitchen.status({ offline = self.age ~= nil, next_event = self.next_event }, shown_at) .. " ›"
+    local status_text = ReadingOS._Kitchen.status({ offline = self.age ~= nil, next_event = self.next_event }, shown_at)
 
     local hdr_h = Screen:scaleBySize(40 * sz.z)
     local seg_pad = Screen:scaleBySize(9)
@@ -1191,6 +1203,8 @@ function Dashboard:build()
         table.insert(batt_widget, batteryIcon(math.max(0, math.min(capacity, 100)) / 100, Screen:scaleBySize(11)))
         segs[#segs + 1] = { widget = batt_widget }
     end
+    -- ⚙ (2.18.2): an outlined icon button, the last cell of the strip
+    segs[#segs + 1] = { widget = ReadingOS._Kitchen.settingsBtn(hdr_h - 2 * Screen:scaleBySize(4)), btn = true }
     for _i, sg in ipairs(segs) do
         if not sg.flex then sg.w = size(sg.widget).w + 2 * seg_pad end
     end
@@ -1211,6 +1225,7 @@ function Dashboard:build()
     local flex_w = math.max(status_min, hdr_inner - usedWidth())
     local header = HorizontalGroup:new {}
     local seg_x, status_x1, status_x2 = pad + bord, nil, nil
+    local gear_x1, gear_x2
     for i, sg in ipairs(segs) do
         if i > 1 then
             table.insert(header, vline(hdr_h))
@@ -1222,6 +1237,7 @@ function Dashboard:build()
             dimen = Geom:new { w = w, h = hdr_h },
             sg.flex and text(status_text, f_hdr, { max_width = inner_w }) or sg.widget })
         if sg.flex then status_x1, status_x2 = seg_x, seg_x + w end
+        if sg.btn then gear_x1, gear_x2 = seg_x, seg_x + w end
         seg_x = seg_x + w
     end
     local hdr_top = y
@@ -1229,6 +1245,10 @@ function Dashboard:build()
     if status_x1 then
         self.hit[#self.hit + 1] = { kind = "settings", label = "status",
             x1 = status_x1, x2 = status_x2, y1 = hdr_top, y2 = y }
+    end
+    if gear_x1 then
+        self.hit[#self.hit + 1] = { kind = "settings", label = "gear",
+            x1 = gear_x1, x2 = gear_x2, y1 = hdr_top, y2 = y }
     end
     gap(8)
 
@@ -1473,8 +1493,13 @@ function Dashboard:build()
         if act.undone then
             add(lrRow(cw, h_row, _("Cofnięte: ") .. tostring(act.label), "", sz.f(SIZE_LABEL), sz.f(SIZE_META)), h_row)
         else
-            add(lrRow(cw, h_row, "✓ " .. tostring(act.label), "COFNIJ", sz.f(SIZE_LABEL), sz.f(SIZE_META), false),
-                h_row, { kind = "undo", label = tostring(act.label) })
+            local ubtn = ReadingOS.blackBtn("COFNIJ", sz.f(SIZE_META), Screen:scaleBySize(12), Screen:scaleBySize(3))
+            local urow = OverlapGroup:new { dimen = { w = cw, h = h_row } }
+            table.insert(urow, LeftContainer:new { dimen = { w = cw, h = h_row },
+                TextWidget:new { text = "✓ " .. tostring(act.label), face = sz.f(SIZE_LABEL),
+                    max_width = math.max(Screen:scaleBySize(40), cw - ubtn:getSize().w - Screen:scaleBySize(20)) } })
+            table.insert(urow, RightContainer:new { dimen = { w = cw, h = h_row }, ubtn })
+            add(urow, h_row, { kind = "undo", label = tostring(act.label) })
         end
     end
     -- ---- A−  A+ | ☼−  level  ☼+ : text size (the shared readingos_kitchen_font,
@@ -4728,13 +4753,13 @@ function View:paintLight(level)
     UIManager:setDirty(self, "ui", self.light_region)
 end
 
---- Header: "piątek, 13 listopada  stan na 14:30 · następne 14:45 ›" + ODŚWIEŻ.
+--- Header: "piątek, 13 listopada  stan na 14:30 · następne 14:45"  ⚙ ⟳
 function View:buildHeader(x0, w)
     local d = self.data or {}
     local h = px(56)
-    local btn_label = _("ODŚWIEŻ")
-    local btn_w = ktext(btn_label, 14, true):getSize().w + 2 * px(12) + 2 * px(3)
-    local status = Kitchen.status(self) .. " ›"
+    local gap = px(8)
+    local btn_w = 2 * px(46) + gap
+    local status = Kitchen.status(self)
     local title = d.today_label or ""
     if d.today and d.today ~= os.date("%Y-%m-%d") then title = _("NIEAKTUALNE · ") .. title end
     local left_w = w - 2 * px(14) - btn_w - px(12)
@@ -4746,10 +4771,11 @@ function View:buildHeader(x0, w)
     }
     local row = HorizontalGroup:new { align = "center",
         cell(w - btn_w - px(14), h - px(3), left, px(14)),
-        button(btn_w, px(44), btn_label, 14, false),
+        Kitchen.settingsBtn(), HorizontalSpan:new { width = gap }, Kitchen.refreshBtn(),
     }
-    self:claim(x0, 0, x0 + w - btn_w - px(14), h, { kind = "settings" })
-    self:claim(x0 + w - btn_w - px(14), 0, x0 + w, h, { kind = "refresh" })
+    local bx = x0 + w - btn_w - px(14)
+    self:claim(x0, 0, bx + px(46) + math.floor(gap / 2), h, { kind = "settings" })
+    self:claim(bx + px(46) + math.floor(gap / 2), 0, x0 + w, h, { kind = "refresh" })
     return VerticalGroup:new { align = "left", row, hline(w, 3) }, h
 end
 
@@ -4839,10 +4865,20 @@ function View:footer(x0, y0, w, h)
     else
         left, right, target = _("ZROBIONE DZIŚ · ") .. tostring(tonumber(t.done) or 0), "›", { kind = "done_list" }
     end
-    local right_w = ktext(right, 14, true):getSize().w
+    -- COFNIJ is a black button (2.18.2), the other rights stay plain text
+    local right_w_, right_widget
+    if target.kind == "undo" then
+        local bh = math.min(px(44), h - px(1) - px(4))
+        local bw = Kitchen.btnW(right, 14, px(70))
+        right_w_, right_widget = bw + px(10), HorizontalGroup:new { button(bw, bh, right, 14, true), HorizontalSpan:new { width = px(10) } }
+    else
+        right_w_ = ktext(right, 14, true):getSize().w
+        right_widget = ktext(right, 14, true)
+    end
+    local right_w = right_w_
     local row = HorizontalGroup:new { align = "center",
         cell(w - right_w - px(14), h - px(1), ktext(left, 14, true, w - right_w - 3 * px(14)), px(14)),
-        ktext(right, 14, true),
+        right_widget,
     }
     self:claim(x0, y0, x0 + w, y0 + h, target)
     return VerticalGroup:new { align = "left", hline(w), row }
@@ -5131,6 +5167,7 @@ ICON_SVG.k_sun_dim = phosphor("M116,36V32a12,12,0,0,1,24,0v4a12,12,0,0,1-24,0Zm8
 ICON_SVG.k_sun_off = ICON_SVG.k_sun:gsub("</svg>$", [[<path d="M36,36L220,220" stroke="#FFFFFF" stroke-width="52" stroke-linecap="round"/><path d="M36,36L220,220" stroke="#000000" stroke-width="22" stroke-linecap="round"/></svg>]])
 ICON_SVG.k_sun_g = ICON_SVG.k_sun:gsub("#000000", "#999999")
 ICON_SVG.k_refresh = phosphor("M228,48V96a12,12,0,0,1-12,12H168a12,12,0,0,1,0-24h19l-7.8-7.8a75.55,75.55,0,0,0-53.32-22.26h-.43A75.49,75.49,0,0,0,72.39,75.57,12,12,0,1,1,55.61,58.41a99.38,99.38,0,0,1,69.87-28.47H126A99.42,99.42,0,0,1,196.2,59.23L204,67V48a12,12,0,0,1,24,0ZM183.61,180.43a75.49,75.49,0,0,1-53.09,21.63h-.43A75.55,75.55,0,0,1,76.77,179.8L69,172H88a12,12,0,0,0,0-24H40a12,12,0,0,0-12,12v48a12,12,0,0,0,24,0V189l7.8,7.8A99.42,99.42,0,0,0,130,226.06h.56a99.38,99.38,0,0,0,69.87-28.47,12,12,0,0,0-16.78-17.16Z")
+ICON_SVG.k_gear = phosphor("M128,76a52,52,0,1,0,52,52A52.06,52.06,0,0,0,128,76Zm0,80a28,28,0,1,1,28-28A28,28,0,0,1,128,156Zm113.86-49.57A12,12,0,0,0,236,98.34L208.21,82.49l-.11-31.31a12,12,0,0,0-4.25-9.12,116,116,0,0,0-38-21.41,12,12,0,0,0-9.68.89L128,37.27,99.83,21.53a12,12,0,0,0-9.7-.9,116.06,116.06,0,0,0-38,21.47,12,12,0,0,0-4.24,9.1l-.14,31.34L20,98.35a12,12,0,0,0-5.85,8.11,110.7,110.7,0,0,0,0,43.11A12,12,0,0,0,20,157.66l27.82,15.85.11,31.31a12,12,0,0,0,4.25,9.12,116,116,0,0,0,38,21.41,12,12,0,0,0,9.68-.89L128,218.73l28.14,15.74a12,12,0,0,0,9.7.9,116.06,116.06,0,0,0,38-21.47,12,12,0,0,0,4.24-9.1l.14-31.34,27.81-15.81a12,12,0,0,0,5.85-8.11A110.7,110.7,0,0,0,241.86,106.43Zm-22.63,33.18-26.88,15.28a11.94,11.94,0,0,0-4.55,4.59c-.54,1-1.11,1.93-1.7,2.88a12,12,0,0,0-1.83,6.31L184.13,199a91.83,91.83,0,0,1-21.07,11.87l-27.15-15.19a12,12,0,0,0-5.86-1.53h-.29c-1.14,0-2.3,0-3.44,0a12.08,12.08,0,0,0-6.14,1.51L93,210.82A92.27,92.27,0,0,1,71.88,199l-.11-30.24a12,12,0,0,0-1.83-6.32c-.58-.94-1.16-1.91-1.7-2.88A11.92,11.92,0,0,0,63.7,155L36.8,139.63a86.53,86.53,0,0,1,0-23.24l26.88-15.28a12,12,0,0,0,4.55-4.58c.54-1,1.11-1.94,1.7-2.89a12,12,0,0,0,1.83-6.31L71.87,57A91.83,91.83,0,0,1,92.94,45.17l27.15,15.19a11.92,11.92,0,0,0,6.15,1.52c1.14,0,2.3,0,3.44,0a12.08,12.08,0,0,0,6.14-1.51L163,45.18A92.27,92.27,0,0,1,184.12,57l.11,30.24a12,12,0,0,0,1.83,6.32c.58.94,1.16,1.91,1.7,2.88A11.92,11.92,0,0,0,192.3,101l26.9,15.33A86.53,86.53,0,0,1,219.23,139.61Z") -- Phosphor GearSix bold, MIT (2.18.2)
 ICON_SVG.k_check_w = phosphor("M232.49,80.49l-128,128a12,12,0,0,1-17,0l-56-56a12,12,0,1,1,17-17L96,183,215.51,63.51a12,12,0,0,1,17,17Z"):gsub("#000000", "#FFFFFF")
 
 --- One stay-awake hold for the whole kitchen. The charger and a running
@@ -5737,13 +5774,21 @@ function Kitchen.btnW(label, n, min_w)
     return math.max(min_w or 0, ktext(label, n, true):getSize().w + 2 * px(10) + 2 * px(3))
 end
 
-function Kitchen.refreshBtn()
+--- `bh` = a shorter button for a strip that is not 44 tall (home / TERAZ header);
+--- same 46 : 44 frame, border and icon scale with it.
+function Kitchen.iconBtn(name, bh)
+    local h = bh or px(44)
+    local w = math.floor(h * 46 / 44 + 0.5)
+    local b = bh and math.max(2, math.floor(px(3) * h / px(44) + 0.5)) or px(3)
     return FrameContainer:new {
-        background = Blitbuffer.COLOR_WHITE, bordersize = px(3), radius = px(8), padding = 0, margin = 0,
-        width = px(46), height = px(44),
-        cell(px(46) - 2 * px(3), px(44) - 2 * px(3), icon("k_refresh", px(18)), 0, true),
+        background = Blitbuffer.COLOR_WHITE, bordersize = b, radius = bh and math.floor(px(8) * h / px(44)) or px(8),
+        padding = 0, margin = 0, width = w, height = h,
+        cell(w - 2 * b, h - 2 * b, icon(name, bh and math.floor(px(18) * h / px(44) + 0.5) or px(18)), 0, true),
     }
 end
+function Kitchen.refreshBtn() return Kitchen.iconBtn("k_refresh") end
+--- The outlined ⚙ next to ⟳ (2.18.2): the tappable face of "Ustawienia".
+function Kitchen.settingsBtn(bh) return Kitchen.iconBtn("k_gear", bh) end
 
 --- −1 only where one less is a thing you can take out: 2 puszki, 6 szt.
 --- Not 500 g (minus one gram) and not the last one (that is ZUŻYTE).
@@ -5817,19 +5862,19 @@ function View:pantrySections()
         { { label = _("KOŃCZY SIĘ · ") .. n_low, rows = low }, { label = _("RESZTA · ") .. n_rest, rows = rest } }
 end
 
---- "Spiżarnia  stan na 14:30 · zużyte dziś: 2 ›"   ZAKUPY · 4 ›   ⟳
+--- "Spiżarnia  stan na 14:30 · zużyte dziś: 2 ›"   ZAKUPY · 4 ›   ⚙ ⟳
 function View:pantryHeader(x0, y0, w, p)
     local h, pad, gap = px(54), px(14), px(8)
     local shop = _("ZAKUPY · ") .. tostring(tonumber(p.shopping_open) or 0) .. " ›"
     local sw = Kitchen.btnW(shop, 14, 0)
     local n_used = #(type(p.consumed) == "table" and p.consumed or {})
-    local left_w = w - pad - sw - gap - px(46) - pad
+    local left_w = w - pad - sw - gap - 2 * px(46) - gap - pad
     local title = ktext(_("Spiżarnia"), 22, true, left_w - pad)
     -- two targets (rule 6): "stan na …" → settings, "zużyte dziś: n ›" → the list
     local room = math.max(1, left_w - pad - title:getSize().w - px(12))
     local used = n_used > 0 and ktext(_("zużyte dziś: ") .. n_used .. " ›", 14, true, math.floor(room / 2)) or nil
     local used_w = used and (used:getSize().w + px(12)) or 0
-    local status = ktext(Kitchen.status(self) .. " ›", 14, false, math.max(1, room - used_w))
+    local status = ktext(Kitchen.status(self), 14, false, math.max(1, room - used_w))
     local left = HorizontalGroup:new { align = "center", title, HorizontalSpan:new { width = px(12) }, status }
     if used then
         table.insert(left, HorizontalSpan:new { width = px(12) })
@@ -5839,11 +5884,14 @@ function View:pantryHeader(x0, y0, w, p)
     local split = used and (x0 + pad + title:getSize().w + px(12) + status:getSize().w + math.floor(px(12) / 2)) or bx
     self:claim(x0, y0, split, y0 + h, { kind = "settings" })
     if used then self:claim(split, y0, bx, y0 + h, { kind = "used_list" }) end
-    self:claim(bx, y0, bx + sw + math.floor(gap / 2), y0 + h, { kind = "shopping" })
-    self:claim(bx + sw + math.floor(gap / 2), y0, x0 + w, y0 + h, { kind = "refresh" })
+    local half = math.floor(gap / 2)
+    self:claim(bx, y0, bx + sw + half, y0 + h, { kind = "shopping" })
+    self:claim(bx + sw + half, y0, bx + sw + gap + px(46) + half, y0 + h, { kind = "settings" })
+    self:claim(bx + sw + gap + px(46) + half, y0, x0 + w, y0 + h, { kind = "refresh" })
     return HorizontalGroup:new { align = "center",
         cell(left_w, h, left, pad),
         button(sw, px(44), shop, 14, false), HorizontalSpan:new { width = gap },
+        Kitchen.settingsBtn(), HorizontalSpan:new { width = gap },
         Kitchen.refreshBtn(),
     }, h
 end
@@ -6073,7 +6121,7 @@ function View:pantryFooter(x0, y0, w, h, page, pages)
             left = HorizontalGroup:new { align = "center",
                 ktext("✓ " .. last.name .. _(" na ZAKUPACH"), 14, true, text_w - cw - px(10)),
                 HorizontalSpan:new { width = px(10) },
-                button(cw, px(44), _("COFNIJ"), 12, false) }
+                button(cw, px(44), _("COFNIJ"), 12, true) }
             self:claim(x0, y0, x0 + pad + text_w + math.floor(px(12) / 2), y0 + h, { kind = "p_shop_undo" })
         end
     else
@@ -6614,9 +6662,9 @@ end
 --- "Plan posiłków  13–19 listopada · stan na 14:30"   ‹  ›  ⟳
 function View:planHeader(x0, y0, w, p)
     local h, pad, gap, bw = px(54), px(14), px(8), px(46)
-    local status = Kitchen.status(self, self.week and self.week_at or nil) .. " ›"
+    local status = Kitchen.status(self, self.week and self.week_at or nil)
     if Kitchen.str(p.range) ~= "" then status = p.range .. " · " .. status end
-    local left_w = w - pad - 3 * bw - 2 * gap - pad
+    local left_w = w - pad - 4 * bw - 3 * gap - pad
     local title = ktext(_("Plan posiłków"), 22, true, left_w - pad)
     local left = HorizontalGroup:new { align = "center", title, HorizontalSpan:new { width = px(12) },
         ktext(status, 14, false, math.max(1, left_w - pad - title:getSize().w - px(12))) }
@@ -6624,11 +6672,13 @@ function View:planHeader(x0, y0, w, p)
     self:claim(x0, y0, bx, y0 + h, { kind = "settings" })
     self:claim(bx, y0, bx + bw + half, y0 + h, { kind = "p_week", delta = -7 })
     self:claim(bx + bw + half, y0, bx + 2 * bw + gap + half, y0 + h, { kind = "p_week", delta = 7 })
-    self:claim(bx + 2 * bw + gap + half, y0, x0 + w, y0 + h, { kind = "refresh" })
+    self:claim(bx + 2 * bw + gap + half, y0, bx + 3 * bw + 2 * gap + half, y0 + h, { kind = "settings" })
+    self:claim(bx + 3 * bw + 2 * gap + half, y0, x0 + w, y0 + h, { kind = "refresh" })
     return HorizontalGroup:new { align = "center",
         cell(left_w, h, left, pad),
         button(bw, px(44), "‹", 18, false), HorizontalSpan:new { width = gap },
         button(bw, px(44), "›", 18, false), HorizontalSpan:new { width = gap },
+        Kitchen.settingsBtn(), HorizontalSpan:new { width = gap },
         Kitchen.refreshBtn(),
     }, h
 end
@@ -9174,15 +9224,18 @@ function ReadingOS:ssWidget(d, stale, lock_label, opts)
     for _, it in ipairs(head) do head_w = head_w + it:getSize().w end
     local head_right = batt_w
     local x_w, status_w = 0, 0
+    local gear, gear_w = nil, 0
     if teraz then
         -- The one close control every ReadingOS screen shares, top right.
         local x_icon = icon("close", dh)
         x_w = x_icon:getSize().w
-        -- "stan na HH:MM ›" (S4): opens the one settings screen
+        -- "stan na HH:MM" (S4) + the ⚙ button (2.18.2): both open the one settings screen
         local at = opts.status_at or os.time()
-        local status = ssText("stan na " .. ReadingOS._Kitchen.clock(at) .. " ›", f_head)
+        local status = ssText("stan na " .. ReadingOS._Kitchen.clock(at), f_head)
+        gear = ReadingOS._Kitchen.settingsBtn(dh)
+        gear_w = gear:getSize().w
         status_w = status:getSize().w + hspan(14):getSize().w
-        head_right = HorizontalGroup:new { align = "center", status, hspan(14), batt_w, hspan(14), x_icon }
+        head_right = HorizontalGroup:new { align = "center", status, hspan(14), gear, hspan(14), batt_w, hspan(14), x_icon }
     end
     local room = cw - head_right:getSize().w - Screen:scaleBySize(16)
     local weather = get("readingos_show_weather") and type(d) == "table" and type(d.weather) == "table" and d.weather or nil
@@ -9214,10 +9267,17 @@ function ReadingOS:ssWidget(d, stale, lock_label, opts)
             y1 = 0, y2 = pad + box + head_row_h + Screen:scaleBySize(14),
         }
         local sx2 = W - (pad + box) - x_w - Screen:scaleBySize(36)
+        local hy2 = pad + box + head_row_h + Screen:scaleBySize(14)
+        -- ⚙ sits left of the battery: [status][⚙][battery][X] (head_right's order)
+        local R, g14 = W - (pad + box), Screen:scaleBySize(14)
+        local gear_r = R - x_w - g14 - batt_w:getSize().w - g14
+        local gear_x1 = gear_r - gear_w - Screen:scaleBySize(7)
+        local gear_x2 = math.min(gear_r + Screen:scaleBySize(7), sx2)
+        hits[#hits + 1] = { kind = "settings", label = "gear", x1 = gear_x1, x2 = gear_x2, y1 = 0, y2 = hy2 }
         hits[#hits + 1] = {
             kind = "settings",
-            x1 = W - (pad + box) - head_right:getSize().w - Screen:scaleBySize(8), x2 = sx2,
-            y1 = 0, y2 = pad + box + head_row_h + Screen:scaleBySize(14),
+            x1 = W - (pad + box) - head_right:getSize().w - Screen:scaleBySize(8), x2 = gear_x1,
+            y1 = 0, y2 = hy2,
         }
     end
     gap(4)
@@ -9285,7 +9345,9 @@ function ReadingOS:ssWidget(d, stale, lock_label, opts)
     if teraz and type(opts.strip) == "table" then
         local st = opts.strip
         local dim = st.dim == true
-        local btn = FrameContainer:new {
+        -- live = the black button (2.18.2), same size as the outlined one; dim stays outlined grey
+        local btn = not dim and ReadingOS.blackBtn("COFNIJ", f_who, Screen:scaleBySize(6), Screen:scaleBySize(6))
+            or FrameContainer:new {
             bordersize = Screen:scaleBySize(2), radius = Screen:scaleBySize(4),
             padding = Screen:scaleBySize(4), margin = 0, background = Blitbuffer.COLOR_WHITE,
             color = dim and Blitbuffer.COLOR_GRAY_5 or nil,
