@@ -6785,6 +6785,9 @@ function View:planLeft(x0, y0, w, h, day)
         local room = bottom - y - (i < #meals and more_h or 0)
         if #left_out == 0 and ih <= room then
             table.insert(g, item)
+            -- 2.19.1 (Tasksss 1351): a planned meal opens its recipe, as in PRZEPISY. Claimed AFTER the card's own
+            -- GOTUJ claim (first hit wins), so today's cooked meal keeps going to the cook screen.
+            if m.recipe_id then self:claim(x0, y, x0 + w, y + ih, { kind = "recipe", id = m.recipe_id }) end
             y = y + ih
         else
             for j = #self.hit, n_hit + 1, -1 do self.hit[j] = nil end -- a card left out leaves no GOTUJ behind
@@ -6873,7 +6876,7 @@ end
 
 -- ---- 2.19 PRZEPISY: every Foood recipe, tap = cook it (even off-plan)
 
---- Black band over a recipe's Gotuj: ‹ PRZEPISY back, PRZEPIS marker.
+--- Black band over a recipe's Gotuj: ‹ PRZEPISY (or ‹ PLAN when opened from the plan) back, PRZEPIS marker.
 function View:recipeStrip(x0, y0, w)
     local h = zpx(40)
     local right = _("PRZEPIS")
@@ -6882,7 +6885,7 @@ function View:recipeStrip(x0, y0, w)
     return FrameContainer:new {
         background = Blitbuffer.COLOR_BLACK, bordersize = 0, padding = 0, margin = 0, width = w, height = h,
         HorizontalGroup:new { align = "center",
-            cell(w - right_w - px(14), h, ktext("‹ " .. _("PRZEPISY"), 14, true, w - right_w - 3 * px(14), true), px(14)),
+            cell(w - right_w - px(14), h, ktext("‹ " .. (self.recipe_from == "plan" and _("PLAN") or _("PRZEPISY")), 14, true, w - right_w - 3 * px(14), true), px(14)),
             ktext(right, 14, true, nil, true),
         },
     }, h
@@ -6911,10 +6914,9 @@ function View:buildRecipes(x0, w, H)
     local top = sh + h + px(3)
     local foot_h = px(58) -- holds the 44 px ‹ › buttons at every A± step, as Spiżarnia's footer
     local ch = H - top - foot_h
-    local head = { strip, header, hline(w, 3) }
     if not list or #list == 0 then
         local note = list and _("Brak przepisów w Foood.") or _("Zaktualizuj serwer Hooome, żeby zobaczyć przepisy.")
-        return VerticalGroup:new { align = "left", unpack(head),
+        return VerticalGroup:new { align = "left", strip, header, hline(w, 3),
             cell(w, H - top, ktext(note, 18, true, w - 2 * pad), 0, true) }
     end
     local row_h = math.max(zpx(56), MIN_TAP + px(2))
@@ -6953,7 +6955,8 @@ function View:buildRecipes(x0, w, H)
         self:claim(nx - math.floor(px(12) / 2), fy, mid, fy + foot_h, { kind = "r_page", to = (page - 2) % pages + 1 })
         self:claim(mid, fy, x0 + w, fy + foot_h, { kind = "r_page", to = page % pages + 1 })
     end
-    return VerticalGroup:new { align = "left", unpack(head), rows,
+    -- not unpack(head): mid-list it keeps ONE value, and the header + rule vanished while the claims still counted them (2.19.0 live: › dead)
+    return VerticalGroup:new { align = "left", strip, header, hline(w, 3), rows,
         VerticalSpan:new { width = ch - used }, cell(w, foot_h, frow, pad) }
 end
 
@@ -6962,6 +6965,7 @@ function View:leaveRecipe(quiet)
     if not self.recipe_mode then return end
     local acted = self.acted_at ~= self.recipe_acted0
     self.data, self.today_data, self.recipe_mode, self.recipe_acted0 = self.today_data or self.data, nil, nil, nil
+    self.recipe_from = nil
     if acted and not quiet then self:refresh() end -- ZUŻYTE/ticks changed the pantry: today's copy is stale
 end
 
@@ -6976,6 +6980,7 @@ function View:openRecipe(id)
     for k, v in pairs(today) do merged[k] = v end
     merged.cook, merged.meal, merged.pantry = data.cook, data.meal, data.pantry
     if not self.today_data then self.today_data, self.recipe_acted0 = today, self.acted_at end
+    if self.screen == "plan" or self.screen == "recipes" then self.recipe_from = self.screen end -- where ‹ goes back to (Q266)
     self.data, self.recipe_mode, self.screen, self.pantry_used = merged, true, "cook", nil
     track("kuchnia", "recipe", tostring(id))
     self:redraw()
@@ -6989,8 +6994,9 @@ function View:recipesTap(t)
     elseif k == "recipe" then
         return self:openRecipe(t.id)
     elseif k == "r_back" then
+        local back = self.recipe_from == "plan" and "plan" or "recipes"
         self:leaveRecipe()
-        self.screen = "recipes"
+        self.screen = back
     else
         return false
     end
