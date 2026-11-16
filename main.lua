@@ -4525,6 +4525,7 @@ View.targetAt = Dashboard.targetAt
 
 function View:init()
     self.opened_at = os.time()
+    self.opened_step = Kitchen.fontStep() -- leaving with another A± step rebuilds home
     -- Turn first, then measure: every row sizes itself off Screen:getWidth().
     local ok, mode = pcall(function() return Screen:getRotationMode() end)
     if ok and type(mode) == "number" and mode % 2 == 0 then
@@ -5040,6 +5041,7 @@ function View:taskDone(t)
     local res, err = self.plugin:act("task", t.id, { op = "done", label = t.label })
     if res or err == "HTTP 404" then
         self.data = Kitchen.without(self.data or {}, t.id)
+        self.home_stale = true -- home holds the old list (and no COFNIJ): refetch it on the way out
     end
     if res then
         self.plugin:noteAct(t.label)
@@ -5061,6 +5063,7 @@ function View:undo()
     local res = self.plugin:act("undo")
     if res and res.ok then
         self.plugin.last_act.undone = true
+        self.home_stale = true
         self.busy = false
         return self:refresh()
     end
@@ -5071,6 +5074,7 @@ end
 --- Czytaj (Q62): back to the book — the kitchen and the dashboard under it close.
 function View:toBook()
     local dash = self.dashboard
+    self.to_book = true -- home closes right after: nothing to rebuild
     self:onClose()
     if dash and dash.onClose then dash:onClose() end
     return true
@@ -5104,6 +5108,16 @@ function View:onCloseWidget()
         local mode = self.saved_rotation
         self.saved_rotation = nil
         pcall(function() Screen:setRotationMode(mode) end)
+    end
+    -- P8 (2026-11-16): home under KUCHNIA was built before anything here, so a
+    -- repaint alone shows the old list, no COFNIJ, the old A± size. Upright first.
+    local dash = self.dashboard
+    if dash and not self.sleeping and not self.to_book and not dash.closed then
+        local fresh = self.home_stale and self.plugin.refreshInto and self.plugin:refreshInto(dash)
+        -- no radio: at least the COFNIJ row and the size, from the data home holds
+        if not fresh and (self.home_stale or Kitchen.fontStep() ~= self.opened_step) and dash.rebuildForUndo then
+            dash:rebuildForUndo()
+        end
     end
     UIManager:setDirty(nil, "full")
 end
